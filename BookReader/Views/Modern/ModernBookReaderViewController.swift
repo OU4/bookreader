@@ -86,6 +86,16 @@ class ModernBookReaderViewController: UIViewController {
     // Reading timer widget
     private var readingTimerWidget: ReadingTimerWidget?
     
+    // Bookmark components
+    private lazy var quickBookmarkButton: QuickBookmarkButton = {
+        let button = QuickBookmarkButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.addTarget(self, action: #selector(quickBookmarkTapped), for: .touchUpInside)
+        return button
+    }()
+    
+    private var addBookmarkView: AddBookmarkView?
+    
     // Constraints for animations
     private var toolbarBottomConstraint: NSLayoutConstraint!
     private var headerTopConstraint: NSLayoutConstraint!
@@ -178,6 +188,7 @@ class ModernBookReaderViewController: UIViewController {
         view.addSubview(navigationHeader)
         view.addSubview(floatingToolbar)
         view.addSubview(settingsPanel)
+        view.addSubview(quickBookmarkButton)
         
         // Setup constraints
         setupConstraints()
@@ -228,7 +239,13 @@ class ModernBookReaderViewController: UIViewController {
             settingsPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             settingsPanel.topAnchor.constraint(equalTo: navigationHeader.bottomAnchor, constant: 16),
             settingsPanel.widthAnchor.constraint(equalToConstant: 280),
-            settingsPanel.heightAnchor.constraint(equalToConstant: 400)
+            settingsPanel.heightAnchor.constraint(equalToConstant: 400),
+            
+            // Quick bookmark button
+            quickBookmarkButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            quickBookmarkButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            quickBookmarkButton.widthAnchor.constraint(equalToConstant: 40),
+            quickBookmarkButton.heightAnchor.constraint(equalToConstant: 40)
         ])
     }
     
@@ -341,6 +358,138 @@ class ModernBookReaderViewController: UIViewController {
         }
     }
     
+    // MARK: - Bookmark Actions
+    @objc private func quickBookmarkTapped() {
+        guard let book = currentBook else { return }
+        
+        // Add quick bookmark
+        UnifiedReadingTracker.shared.addQuickBookmark(
+            for: book.id,
+            bookTitle: book.title,
+            pdfView: pdfView,
+            textView: textView
+        )
+        
+        // Update bookmark button state
+        quickBookmarkButton.setBookmarked(true, animated: true)
+        
+        // Reset bookmark state after animation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.quickBookmarkButton.setBookmarked(false, animated: true)
+        }
+        
+        // Show brief confirmation
+        showBookmarkConfirmation()
+    }
+    
+    private func showBookmarkConfirmation() {
+        let label = UILabel()
+        label.text = "📑 Bookmark Added"
+        label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+        label.textColor = .white
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.8)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 20
+        label.layer.masksToBounds = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        
+        view.addSubview(label)
+        
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 100),
+            label.widthAnchor.constraint(equalToConstant: 160),
+            label.heightAnchor.constraint(equalToConstant: 40)
+        ])
+        
+        // Animate in
+        label.alpha = 0
+        label.transform = CGAffineTransform(translationX: 0, y: -20)
+        
+        UIView.animate(withDuration: 0.3, animations: {
+            label.alpha = 1
+            label.transform = .identity
+        }) { _ in
+            UIView.animate(withDuration: 0.3, delay: 1.5, animations: {
+                label.alpha = 0
+                label.transform = CGAffineTransform(translationX: 0, y: -20)
+            }) { _ in
+                label.removeFromSuperview()
+            }
+        }
+    }
+    
+    private func showAddBookmarkView() {
+        guard let book = currentBook else { return }
+        
+        let bookmarkView = AddBookmarkView()
+        bookmarkView.delegate = self
+        bookmarkView.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Pre-populate with current position
+        if let pageNumber = getCurrentPageNumber() {
+            bookmarkView.prepopulate(title: "Page \(pageNumber)")
+        } else {
+            bookmarkView.prepopulate(title: "Reading Position")
+        }
+        
+        view.addSubview(bookmarkView)
+        
+        NSLayoutConstraint.activate([
+            bookmarkView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            bookmarkView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            bookmarkView.widthAnchor.constraint(equalToConstant: 320),
+            bookmarkView.heightAnchor.constraint(equalToConstant: 300)
+        ])
+        
+        // Animate in
+        bookmarkView.alpha = 0
+        bookmarkView.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            bookmarkView.alpha = 1
+            bookmarkView.transform = .identity
+        }
+        
+        addBookmarkView = bookmarkView
+    }
+    
+    private func showBookmarksList() {
+        guard let book = currentBook else { return }
+        
+        let bookmarksVC = BookmarksViewController(bookId: book.id)
+        let navController = UINavigationController(rootViewController: bookmarksVC)
+        
+        present(navController, animated: true)
+        
+        // Listen for bookmark selection
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(bookmarkSelected(_:)),
+            name: NSNotification.Name("BookmarkSelected"),
+            object: nil
+        )
+    }
+    
+    @objc private func bookmarkSelected(_ notification: Notification) {
+        guard let bookmark = notification.object as? BookmarkItem else { return }
+        
+        // Navigate to bookmark
+        if let pdfView = pdfView, pdfView.superview != nil {
+            _ = BookmarkManager.shared.navigateToBookmark(bookmark, in: pdfView)
+        } else if textView.superview != nil {
+            _ = BookmarkManager.shared.navigateToBookmark(bookmark, in: textView)
+        }
+    }
+    
+    private func getCurrentPageNumber() -> Int? {
+        if let currentPage = pdfView?.currentPage,
+           let document = pdfView?.document {
+            return document.index(for: currentPage) + 1
+        }
+        return nil
+    }
+    
     private func showWelcomeAnimation() {
         // Only show welcome if no book is loaded
         guard currentBook == nil else { return }
@@ -446,7 +595,7 @@ class ModernBookReaderViewController: UIViewController {
         navigationHeader.setBookTitle(book.title, author: book.author)
         
         // Start reading session tracking
-        ReadingSessionTracker.shared.startSession(for: book)
+        UnifiedReadingTracker.shared.startSession(for: book)
         
         // Load book content with beautiful animation
         loadBookContent(book)
@@ -727,7 +876,7 @@ class ModernBookReaderViewController: UIViewController {
         guard let book = currentBook,
               let pdfView = pdfView else { return }
         
-        // Use professional highlight manager to load and apply highlights
+        // Load existing highlights (keeping existing highlight manager for now)
         ReadingPositionManager.shared.applyHighlights(to: pdfView, bookId: book.id)
         
         // Force PDF view to refresh
@@ -880,6 +1029,20 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
         searchAction.setValue(UIImage(systemName: "magnifyingglass"), forKey: "image")
         actionSheet.addAction(searchAction)
         
+        // Add Bookmark
+        let addBookmarkAction = UIAlertAction(title: "Add Bookmark", style: .default) { [weak self] _ in
+            self?.showAddBookmarkView()
+        }
+        addBookmarkAction.setValue(UIImage(systemName: "bookmark.fill"), forKey: "image")
+        actionSheet.addAction(addBookmarkAction)
+        
+        // View Bookmarks
+        let viewBookmarksAction = UIAlertAction(title: "View Bookmarks", style: .default) { [weak self] _ in
+            self?.showBookmarksList()
+        }
+        viewBookmarksAction.setValue(UIImage(systemName: "list.bullet.rectangle"), forKey: "image")
+        actionSheet.addAction(viewBookmarksAction)
+        
         // Settings
         let settingsAction = UIAlertAction(title: "Reading Settings", style: .default) { [weak self] _ in
             self?.showSettings()
@@ -907,15 +1070,21 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
     }
     
     private func showStats() {
-        let statsVC = ReadingStatsViewController()
-        statsVC.modalPresentationStyle = .pageSheet
+        // Show simple stats alert
+        let stats = UnifiedReadingTracker.shared.getTrackerStats()
+        let (todayMinutes, goalProgress) = UnifiedReadingTracker.shared.getTodayProgress()
+        let streak = UnifiedReadingTracker.shared.getCurrentStreak()
         
-        if let sheet = statsVC.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.prefersGrabberVisible = true
-        }
+        let message = """
+        📚 Today: \(todayMinutes) minutes
+        🎯 Goal Progress: \(Int(goalProgress))%
+        🔥 Current Streak: \(streak) days
+        ⏱️ Total Time: \(Int(stats.totalReadingTime / 3600)) hours
+        """
         
-        present(statsVC, animated: true)
+        let alert = UIAlertController(title: "Reading Stats", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
     
     private func showSettings() {
@@ -1115,7 +1284,7 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
               let color = objc_getAssociatedObject(self, &AssociatedKeys.highlightColor) as? UIColor,
               let pdfView = pdfView else { return }
         
-        // Use professional highlight manager to save with exact coordinates
+        // Keep using professional highlight manager for highlights (not part of unified tracker)
         if let pdfHighlight = ReadingPositionManager.shared.saveHighlight(for: book.id, selection: selection, color: color) {
             
             // Apply the highlight visually to the PDF
@@ -1309,7 +1478,7 @@ extension ModernBookReaderViewController {
         currentSessionDuration = 0
         
         // Show reading timer widget
-        showReadingTimerWidget()
+        // showReadingTimerWidget() // Commented out - timer widget disabled
         
         // Update session duration every second
         sessionTimer?.invalidate()
@@ -1334,55 +1503,31 @@ extension ModernBookReaderViewController {
         // Pause reading session when app goes to background
         if sessionTimer != nil {
             saveCurrentPosition()
-            endReadingSession()
+            UnifiedReadingTracker.shared.pauseSession()
+            sessionTimer?.invalidate()
+            sessionTimer = nil
         }
     }
     
     @objc private func appWillEnterForeground() {
         // Resume reading session when app comes back
         if currentBook != nil && view.window != nil {
-            startReadingSession()
+            UnifiedReadingTracker.shared.resumeSession()
+            // Restart internal timer
+            sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.updateSessionDuration()
+            }
         }
     }
     
     private func endReadingSession() {
-        guard let book = currentBook, let startTime = sessionStartTime else { return }
+        guard let book = currentBook else { return }
         
         // Hide reading timer widget
         hideReadingTimerWidget()
         
-        // Calculate total session duration
-        let sessionDuration = Date().timeIntervalSince(startTime)
-        
-        // Update book's reading stats
-        if var updatedBook = currentBook {
-            updatedBook.readingStats.totalReadingTime += sessionDuration
-            updatedBook.readingStats.sessionsCount += 1
-            updatedBook.readingStats.lastReadDate = Date()
-            
-            // Update reading streak
-            if let lastRead = book.readingStats.lastReadDate {
-                let calendar = Calendar.current
-                let daysSinceLastRead = calendar.dateComponents([.day], from: lastRead, to: Date()).day ?? 0
-                
-                if daysSinceLastRead <= 1 {
-                    updatedBook.readingStats.currentStreak += 1
-                    updatedBook.readingStats.longestStreak = max(updatedBook.readingStats.currentStreak, updatedBook.readingStats.longestStreak)
-                } else {
-                    updatedBook.readingStats.currentStreak = 1
-                }
-            } else {
-                updatedBook.readingStats.currentStreak = 1
-                updatedBook.readingStats.longestStreak = 1
-            }
-            
-            // Save updated book
-            BookStorage.shared.updateBook(updatedBook)
-            self.currentBook = updatedBook
-        }
-        
-        // End the reading session in tracker
-        ReadingSessionTracker.shared.endCurrentSession()
+        // End the reading session in unified tracker (it handles all stats)
+        UnifiedReadingTracker.shared.endSession()
         
         // Stop timers
         sessionTimer?.invalidate()
@@ -1390,7 +1535,7 @@ extension ModernBookReaderViewController {
         positionSaveTimer?.invalidate()
         positionSaveTimer = nil
         
-        print("📚 Ended reading session. Duration: \(Int(sessionDuration)) seconds")
+        print("📚 Ended reading session")
     }
     
     private func updateSessionDuration() {
@@ -1454,22 +1599,22 @@ extension ModernBookReaderViewController {
     private func saveCurrentPosition() {
         guard let book = currentBook else { return }
         
-        // Use professional position manager
+        // Use unified reading tracker for position saving
         if !textView.isHidden {
-            ReadingPositionManager.shared.savePosition(for: book.id, textView: textView)
+            UnifiedReadingTracker.shared.savePosition(for: book.id, textView: textView, totalLength: extractedText.count)
         } else if let pdfView = pdfView, !pdfView.isHidden {
-            ReadingPositionManager.shared.savePosition(for: book.id, pdfView: pdfView)
+            UnifiedReadingTracker.shared.savePosition(for: book.id, pdfView: pdfView)
         }
     }
     
     private func restoreLastPosition() {
         guard let book = currentBook else { return }
         
-        // Use professional position manager
+        // Use unified reading tracker for position restoration
         if !textView.isHidden {
-            ReadingPositionManager.shared.restorePosition(for: book.id, textView: textView)
+            UnifiedReadingTracker.shared.restorePosition(for: book.id, in: textView)
         } else if let pdfView = pdfView, !pdfView.isHidden {
-            ReadingPositionManager.shared.restorePosition(for: book.id, pdfView: pdfView)
+            UnifiedReadingTracker.shared.restorePosition(for: book.id, in: pdfView)
         }
         
         // Update progress view based on saved position
@@ -1528,11 +1673,6 @@ extension ModernBookReaderViewController: ModernTextMenuDelegate {
     }
 }
 
-extension ModernBookReaderViewController: LibraryViewControllerDelegate {
-    func didSelectBook(_ book: Book) {
-        loadBook(book)
-    }
-}
 
 // MARK: - PDFViewDelegate
 extension ModernBookReaderViewController: PDFViewDelegate {
@@ -1546,5 +1686,57 @@ extension ModernBookReaderViewController: PDFViewDelegate {
         // Save position when navigation ends (page change, zoom, etc.)
         saveCurrentPosition()
         updateReadingProgress()
+    }
+}
+
+// MARK: - AddBookmarkViewDelegate
+extension ModernBookReaderViewController: AddBookmarkViewDelegate {
+    
+    func addBookmarkView(_ view: AddBookmarkView, didCreateBookmarkWithTitle title: String, note: String?, type: BookmarkItem.BookmarkType) {
+        guard let book = currentBook else { return }
+        
+        // Add the bookmark
+        if let pdfView = pdfView, pdfView.superview != nil {
+            _ = BookmarkManager.shared.addBookmarkFromPDF(
+                bookId: book.id,
+                bookTitle: book.title,
+                pdfView: pdfView,
+                title: title,
+                note: note,
+                type: type
+            )
+        } else if textView.superview != nil {
+            _ = BookmarkManager.shared.addBookmarkFromText(
+                bookId: book.id,
+                bookTitle: book.title,
+                textView: textView,
+                title: title,
+                note: note,
+                type: type
+            )
+        }
+        
+        // Remove the view with animation
+        UIView.animate(withDuration: 0.3, animations: {
+            view.alpha = 0
+            view.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        }) { _ in
+            view.removeFromSuperview()
+            self.addBookmarkView = nil
+        }
+        
+        // Show confirmation
+        showBookmarkConfirmation()
+    }
+    
+    func addBookmarkViewDidCancel(_ view: AddBookmarkView) {
+        // Remove the view with animation
+        UIView.animate(withDuration: 0.3, animations: {
+            view.alpha = 0
+            view.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        }) { _ in
+            view.removeFromSuperview()
+            self.addBookmarkView = nil
+        }
     }
 }

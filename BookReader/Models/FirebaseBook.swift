@@ -58,6 +58,8 @@ struct FirebaseBook: Codable {
             notes: [],
             readingStats: ReadingStats(
                 totalReadingTime: totalReadingTime,
+                sessionsCount: 0,
+                averageReadingSpeed: 0,
                 lastReadDate: lastReadDate?.dateValue,
                 currentStreak: 0,
                 longestStreak: 0,

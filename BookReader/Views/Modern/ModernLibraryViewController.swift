@@ -453,12 +453,15 @@ class ModernLibraryViewController: UIViewController {
     
     private func refreshStats() {
         let totalBooks = books.count
-        let totalReadingTime = books.reduce(0) { $0 + $1.readingStats.totalReadingTime }
         let booksCompleted = books.filter { $0.lastReadPosition >= 1.0 }.count
+        
+        // Get reading time from UnifiedReadingTracker
+        let stats = UnifiedReadingTracker.shared.getTrackerStats()
+        let totalReadingMinutes = Int(stats.totalReadingTime / 60)
         
         statsView.updateStats(
             totalBooks: totalBooks,
-            readingTime: Int(totalReadingTime / 60), // Convert to minutes
+            readingTime: totalReadingMinutes,
             completedBooks: booksCompleted
         )
     }
@@ -530,7 +533,17 @@ class ModernLibraryViewController: UIViewController {
         // Settings action
         alertController.addAction(UIAlertAction(title: "Settings", style: .default) { _ in
             // Navigate to settings
-            let settingsVC = SettingsViewController()
+            let settingsVC = UIViewController()
+            settingsVC.title = "Settings"
+            let settingsPanel = ModernSettingsPanel()
+            settingsVC.view.addSubview(settingsPanel)
+            settingsPanel.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                settingsPanel.topAnchor.constraint(equalTo: settingsVC.view.safeAreaLayoutGuide.topAnchor),
+                settingsPanel.leadingAnchor.constraint(equalTo: settingsVC.view.leadingAnchor),
+                settingsPanel.trailingAnchor.constraint(equalTo: settingsVC.view.trailingAnchor),
+                settingsPanel.bottomAnchor.constraint(equalTo: settingsVC.view.bottomAnchor)
+            ])
             let navController = UINavigationController(rootViewController: settingsVC)
             self.present(navController, animated: true)
         })
@@ -553,9 +566,10 @@ class ModernLibraryViewController: UIViewController {
     }
     
     @objc private func showDetailedStats() {
-        let statsVC = ReadingStatsViewController()
-        let navController = UINavigationController(rootViewController: statsVC)
-        present(navController, animated: true)
+        // Stats view removed - using simplified tracking
+        let alert = UIAlertController(title: "Reading Stats", message: "Check your reading progress in the stats card above.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
     
     private func signOut() {
@@ -645,7 +659,7 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
     private func getRecentlyReadBooks() -> [Book] {
         return filteredBooks
             .filter { $0.readingStats.lastReadDate != nil }
-            .sorted { $0.readingStats.lastReadDate! > $1.readingStats.lastReadDate! }
+            .sorted(by: { $0.readingStats.lastReadDate! > $1.readingStats.lastReadDate! })
             .prefix(5)
             .map { $0 }
     }
@@ -669,7 +683,15 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
 extension ModernLibraryViewController: UICollectionViewDelegate {
     
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let book = filteredBooks[indexPath.item]
+        let book: Book
+        if indexPath.section == 0 && !getRecentlyReadBooks().isEmpty {
+            // Continue Reading section - get from recently read books
+            let recentBooks = getRecentlyReadBooks()
+            book = recentBooks[indexPath.item]
+        } else {
+            // All books section
+            book = filteredBooks[indexPath.item]
+        }
         
         print("📖 Selected book: \(book.title)")
         print("📂 File path: \(book.filePath)")

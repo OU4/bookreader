@@ -322,37 +322,27 @@ class ReadingTimerWidget: UIView {
     
     // MARK: - Stats Update
     func updateReadingStats() {
-        // Get current session stats from ReadingSessionTracker
-        let tracker = ReadingSessionTracker.shared
-        
-        // Update reading speed using actual session data
+        // Update reading speed using time-based estimate
         if let startTime = sessionStartTime {
             let elapsed = Date().timeIntervalSince(startTime)
             if elapsed > 30 { // Only show after 30 seconds for better accuracy
-                // Get actual reading stats from the session tracker
-                if let bookId = tracker.getCurrentSessionBookId(),
-                   let stats = tracker.getReadingStats(for: bookId) {
-                    let currentWPM = Int(stats.averageReadingSpeed)
-                    wpmLabel.text = "\(currentWPM)\nWPM"
-                } else {
-                    // Fallback to time-based estimate with better calculation
-                    let estimatedWordsRead = Int(elapsed / 4) // More generous: 1 word per 4 seconds
-                    let wpm = Int(Double(estimatedWordsRead) / (elapsed / 60.0))
-                    wpmLabel.text = "\(max(wpm, 50))\nWPM" // Minimum reasonable reading speed
-                }
+                // Simple time-based estimate
+                let estimatedWordsRead = Int(elapsed / 3) // Assume 1 word per 3 seconds average
+                let wpm = Int(Double(estimatedWordsRead) / (elapsed / 60.0))
+                wpmLabel.text = "\(max(wpm, 50))\nWPM" // Minimum reasonable reading speed
             } else {
                 wpmLabel.text = "...\nWPM"
             }
         }
         
-        // Update daily goal progress using ReadingGoalManager
-        let goalProgress = ReadingGoalManager.shared.checkDailyGoalProgress()
-        let progressPercentage = Int(goalProgress.percentage)
+        // Update daily goal progress using UnifiedReadingTracker
+        let (_, percentage) = UnifiedReadingTracker.shared.getTodayProgress()
+        let progressPercentage = Int(percentage)
         
         goalLabel.text = "Goal:\n\(progressPercentage)%"
         
         // Change color based on progress
-        if goalProgress.isCompleted {
+        if progressPercentage >= 100 {
             goalLabel.textColor = .systemGreen
         } else if progressPercentage >= 50 {
             goalLabel.textColor = .systemOrange
@@ -360,12 +350,7 @@ class ReadingTimerWidget: UIView {
             goalLabel.textColor = .secondaryLabel
         }
         
-        // Check for achievements
-        let achievements = ReadingGoalManager.shared.checkForAchievements()
-        if !achievements.isEmpty {
-            // Show achievement notification
-            showAchievementNotification(achievements.first!)
-        }
+        // Achievement checking removed - simplified tracking
     }
     
     func updateProgress(_ progress: Float) {
@@ -476,69 +461,6 @@ class ReadingTimerWidget: UIView {
         // Auto-hide after 2 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             self.closeWidget()
-        }
-    }
-    
-    private func showAchievementNotification(_ achievement: Achievement) {
-        // Create achievement banner
-        let achievementView = UIView()
-        achievementView.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.9)
-        achievementView.layer.cornerRadius = 8
-        achievementView.translatesAutoresizingMaskIntoConstraints = false
-        
-        let iconLabel = UILabel()
-        iconLabel.text = achievement.icon
-        iconLabel.font = UIFont.systemFont(ofSize: 20)
-        iconLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        let titleLabel = UILabel()
-        titleLabel.text = achievement.title
-        titleLabel.font = UIFont.boldSystemFont(ofSize: 12)
-        titleLabel.textColor = .white
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        achievementView.addSubview(iconLabel)
-        achievementView.addSubview(titleLabel)
-        
-        NSLayoutConstraint.activate([
-            iconLabel.leadingAnchor.constraint(equalTo: achievementView.leadingAnchor, constant: 8),
-            iconLabel.centerYAnchor.constraint(equalTo: achievementView.centerYAnchor),
-            
-            titleLabel.leadingAnchor.constraint(equalTo: iconLabel.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: achievementView.trailingAnchor, constant: -8),
-            titleLabel.centerYAnchor.constraint(equalTo: achievementView.centerYAnchor),
-            
-            achievementView.heightAnchor.constraint(equalToConstant: 40)
-        ])
-        
-        // Add to superview temporarily
-        if let superview = superview {
-            superview.addSubview(achievementView)
-            
-            NSLayoutConstraint.activate([
-                achievementView.centerXAnchor.constraint(equalTo: superview.centerXAnchor),
-                achievementView.topAnchor.constraint(equalTo: superview.safeAreaLayoutGuide.topAnchor, constant: 100),
-                achievementView.widthAnchor.constraint(equalToConstant: 200)
-            ])
-            
-            // Animate in
-            achievementView.alpha = 0
-            achievementView.transform = CGAffineTransform(translationX: 0, y: -20)
-            
-            UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-                achievementView.alpha = 1
-                achievementView.transform = .identity
-            }
-            
-            // Auto-remove after 3 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                UIView.animate(withDuration: 0.3, animations: {
-                    achievementView.alpha = 0
-                    achievementView.transform = CGAffineTransform(translationX: 0, y: -20)
-                }) { _ in
-                    achievementView.removeFromSuperview()
-                }
-            }
         }
     }
     

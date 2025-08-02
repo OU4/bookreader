@@ -10,7 +10,7 @@ import UIKit
 protocol ModernFloatingToolbarDelegate: AnyObject {
     func didTapLibrary()
     func didTapHighlight()
-    func didTapNotes()
+    func didTapBookmarks()
     func didTapMore()
 }
 
@@ -51,9 +51,9 @@ class ModernFloatingToolbar: UIView {
         action: #selector(highlightTapped)
     )
     
-    private lazy var notesButton = createModernButton(
-        icon: "note.text",
-        action: #selector(notesTapped)
+    private lazy var bookmarksButton = createModernButton(
+        icon: "bookmark.fill",
+        action: #selector(bookmarksTapped)
     )
     
     private lazy var moreButton = createModernButton(
@@ -84,7 +84,7 @@ class ModernFloatingToolbar: UIView {
         // Add buttons to stack - only 4 for better UX
         stackView.addArrangedSubview(libraryButton)
         stackView.addArrangedSubview(highlightButton)
-        stackView.addArrangedSubview(notesButton)
+        stackView.addArrangedSubview(bookmarksButton)
         stackView.addArrangedSubview(moreButton)
         
         blurView.contentView.addSubview(stackView)
@@ -172,9 +172,9 @@ class ModernFloatingToolbar: UIView {
         delegate?.didTapHighlight()
     }
     
-    @objc private func notesTapped() {
-        animateButtonPress(notesButton)
-        delegate?.didTapNotes()
+    @objc private func bookmarksTapped() {
+        animateButtonPress(bookmarksButton)
+        delegate?.didTapBookmarks()
     }
     
     @objc private func moreTapped() {
@@ -218,7 +218,7 @@ class ModernFloatingToolbar: UIView {
         UIView.animate(withDuration: 0.3) {
             let buttonColor = theme.isDarkMode ? UIColor.white.withAlphaComponent(0.1) : UIColor.black.withAlphaComponent(0.08)
             
-            [self.libraryButton, self.highlightButton, self.notesButton, 
+            [self.libraryButton, self.highlightButton, self.bookmarksButton, 
              self.moreButton].forEach { button in
                 button.backgroundColor = buttonColor
             }

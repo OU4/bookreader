@@ -8,6 +8,7 @@
 import UIKit
 import PDFKit
 import AVFoundation
+import VisionKit
 
 class ModernBookReaderViewController: UIViewController {
     
@@ -94,7 +95,17 @@ class ModernBookReaderViewController: UIViewController {
         return button
     }()
     
+    private var bookmarkSidebar: BookmarkSidebarView?
+    
     private var addBookmarkView: AddBookmarkView?
+    
+    private var searchView: BookSearchView?
+    
+    // Live Text support
+    @available(iOS 16.0, *)
+    private lazy var imageAnalyzer = ImageAnalyzer()
+    @available(iOS 16.0, *)
+    private var imageInteraction: ImageAnalysisInteraction?
     
     // Constraints for animations
     private var toolbarBottomConstraint: NSLayoutConstraint!
@@ -106,6 +117,7 @@ class ModernBookReaderViewController: UIViewController {
         setupModernUI()
         setupGestures()
         loadTheme()
+        setupLiveText()
         showWelcomeAnimation()
     }
     
@@ -337,6 +349,75 @@ class ModernBookReaderViewController: UIViewController {
         }
     }
     
+    // MARK: - Live Text Setup
+    private func setupLiveText() {
+        guard #available(iOS 16.0, *) else { return }
+        
+        // Check if Live Text is supported
+        guard ImageAnalyzer.isSupported else {
+            print("❌ Live Text is not supported on this device")
+            return
+        }
+        
+        print("📝 Setting up Live Text support...")
+        
+        // Enable enhanced text interaction for PDFs
+        if let pdfView = pdfView {
+            pdfView.displayMode = .singlePageContinuous
+            
+            // Create image interaction for Live Text
+            let interaction = ImageAnalysisInteraction()
+            interaction.preferredInteractionTypes = [.textSelection, .dataDetectors]
+            interaction.delegate = self
+            
+            // Add interaction to PDFView's document view
+            if let documentView = pdfView.documentView {
+                documentView.addInteraction(interaction)
+                imageInteraction = interaction
+            }
+            
+            // Analyze current page when PDF loads
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfPageChanged),
+                name: .PDFViewPageChanged,
+                object: pdfView
+            )
+        }
+    }
+    
+    @available(iOS 16.0, *)
+    @objc private func pdfPageChanged(_ notification: Notification) {
+        guard let pdfView = notification.object as? PDFView,
+              let currentPage = pdfView.currentPage else { return }
+        
+        Task {
+            await analyzePDFPage(currentPage)
+        }
+    }
+    
+    @available(iOS 16.0, *)
+    private func analyzePDFPage(_ page: PDFPage) async {
+        let pageSize = page.bounds(for: .mediaBox).size
+        let image = page.thumbnail(of: pageSize, for: .mediaBox)
+        
+        do {
+            let configuration = ImageAnalyzer.Configuration([.text, .machineReadableCode])
+            let analysis = try await imageAnalyzer.analyze(image, configuration: configuration)
+            
+            await MainActor.run {
+                if let interaction = self.imageInteraction {
+                    interaction.analysis = analysis
+                    interaction.isSupplementaryInterfaceHidden = true
+                    
+                    print("✅ Live Text enabled for page with \(analysis.transcript.count) characters")
+                }
+            }
+        } catch {
+            print("❌ Live Text analysis failed: \(error)")
+        }
+    }
+    
     // MARK: - UI Animations
     private func toggleUI() {
         isToolbarVisible.toggle()
@@ -452,6 +533,30 @@ class ModernBookReaderViewController: UIViewController {
         }
         
         addBookmarkView = bookmarkView
+    }
+    
+    private func showBookmarkSidebar() {
+        guard let book = currentBook else { return }
+        
+        // Remove existing sidebar if any
+        bookmarkSidebar?.removeFromSuperview()
+        
+        // Create new sidebar
+        let sidebar = BookmarkSidebarView()
+        sidebar.delegate = self
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        
+        view.addSubview(sidebar)
+        
+        NSLayoutConstraint.activate([
+            sidebar.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            sidebar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        
+        bookmarkSidebar = sidebar
+        sidebar.show(bookId: book.id)
     }
     
     private func showBookmarksList() {
@@ -855,21 +960,20 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     private func setupLiveTextForPDF() {
-        // Temporarily disabled LiveText to fix UI blocking issues
-        print("📝 LiveText temporarily disabled to fix UI interactions")
-        return
-        
-        /*
-        // Enable Live Text selection for PDFs, but keep it non-intrusive
-        liveTextSelectionView.isHidden = false
-        liveTextSelectionView.isUserInteractionEnabled = true
-        
-        // Delay LiveText attachment to avoid conflicts
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.liveTextSelectionView.attachToPDFView(self?.pdfView)
-            print("✅ LiveText selection enabled for PDF")
+        guard #available(iOS 16.0, *) else {
+            print("📝 Live Text requires iOS 16.0 or later")
+            return
         }
-        */
+        
+        guard let pdfView = pdfView,
+              let currentPage = pdfView.currentPage else { return }
+        
+        print("📝 Setting up Live Text for PDF...")
+        
+        // Analyze the current page
+        Task {
+            await analyzePDFPage(currentPage)
+        }
     }
     
     private func loadExistingHighlights() {
@@ -1131,6 +1235,10 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
         print("🖍️ Highlighting mode enabled - select text in PDF to highlight")
     }
     
+    func didTapBookmarks() {
+        showBookmarkSidebar()
+    }
+    
     private func showHighlightColorPickerForSelection(_ selection: PDFSelection) {
         let alert = UIAlertController(title: "Highlight Selected Text", 
                                     message: "Choose a color to highlight:\n\"\(selection.string?.prefix(50) ?? "")...\"", 
@@ -1362,27 +1470,31 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
     }
     
     private func didTapSearch() {
-        // Show search interface
-        guard let pdfView = pdfView, !pdfView.isHidden, pdfView.document != nil else {
-            showAlert(title: "Search", message: "Search is only available for PDF files")
-            return
-        }
+        guard let book = currentBook else { return }
         
-        let alert = UIAlertController(title: "Search PDF", message: "Enter text to search for:", preferredStyle: .alert)
+        showSearchView(for: book)
+    }
+    
+    private func showSearchView(for book: Book) {
+        // Remove existing search view if any
+        searchView?.removeFromSuperview()
         
-        alert.addTextField { textField in
-            textField.placeholder = "Search term..."
-            textField.clearButtonMode = .whileEditing
-        }
+        // Create new search view
+        let search = BookSearchView()
+        search.delegate = self
+        search.translatesAutoresizingMaskIntoConstraints = false
         
-        alert.addAction(UIAlertAction(title: "Search", style: .default) { [weak self] _ in
-            guard let searchText = alert.textFields?.first?.text, !searchText.isEmpty else { return }
-            self?.searchInPDF(searchText)
-        })
+        view.addSubview(search)
         
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        NSLayoutConstraint.activate([
+            search.topAnchor.constraint(equalTo: view.topAnchor),
+            search.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            search.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            search.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
         
-        present(alert, animated: true)
+        searchView = search
+        search.show(for: book, pdfDocument: pdfView?.document)
     }
     
     private func searchInPDF(_ searchText: String) {
@@ -1737,6 +1849,126 @@ extension ModernBookReaderViewController: AddBookmarkViewDelegate {
         }) { _ in
             view.removeFromSuperview()
             self.addBookmarkView = nil
+        }
+    }
+}
+
+// MARK: - Bookmark Sidebar Delegate
+extension ModernBookReaderViewController: BookmarkSidebarDelegate {
+    func bookmarkSidebar(_ sidebar: BookmarkSidebarView, didSelectBookmark bookmark: BookmarkItem) {
+        // Navigate to the selected bookmark
+        if let pdfView = pdfView, pdfView.superview != nil {
+            _ = BookmarkManager.shared.navigateToBookmark(bookmark, in: pdfView)
+        } else if textView.superview != nil {
+            _ = BookmarkManager.shared.navigateToBookmark(bookmark, in: textView)
+        }
+    }
+    
+    func bookmarkSidebarDidRequestNewBookmark(_ sidebar: BookmarkSidebarView) {
+        // Hide sidebar and show add bookmark view
+        sidebar.hide()
+        showAddBookmarkView()
+    }
+}
+
+// MARK: - ImageAnalysisInteractionDelegate
+@available(iOS 16.0, *)
+extension ModernBookReaderViewController: ImageAnalysisInteractionDelegate {
+    
+    func interaction(_ interaction: ImageAnalysisInteraction, shouldBeginAt point: CGPoint, for interactionType: ImageAnalysisInteraction.InteractionTypes) -> Bool {
+        // Allow all interaction types
+        return true
+    }
+    
+    func interaction(_ interaction: ImageAnalysisInteraction, highlightSelectedItemsDidChange highlightSelectedItems: Bool) {
+        // Handle highlight changes if needed
+        if highlightSelectedItems {
+            print("📝 Live Text: Text selected")
+        }
+    }
+    
+    func contentsRect(for interaction: ImageAnalysisInteraction) -> CGRect {
+        // Return the visible area of the PDF
+        return pdfView?.documentView?.bounds ?? .zero
+    }
+}
+
+// MARK: - BookSearchDelegate
+extension ModernBookReaderViewController: BookSearchDelegate {
+    func bookSearch(_ searchView: BookSearchView, didSelectResult result: BookSearchResult) {
+        print("🔍 Search result selected: Page \(result.pageNumber)")
+        
+        guard let pdfView = pdfView else {
+            print("❌ No PDF view available")
+            return
+        }
+        
+        // First, try to navigate using the selection (more precise)
+        if let selection = result.selection,
+           let page = selection.pages.first {
+            
+            print("📍 Navigating to page using selection")
+            pdfView.go(to: page)
+            
+            // Highlight the selection temporarily
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                pdfView.setCurrentSelection(selection, animate: true)
+                print("✅ Selection highlighted")
+                
+                // Clear selection after showing it
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    pdfView.clearSelection()
+                }
+            }
+            
+        } else if let document = pdfView.document,
+                  result.pageNumber > 0 && result.pageNumber <= document.pageCount {
+            
+            // Fallback: navigate by page number
+            print("📍 Navigating to page \(result.pageNumber) using page number")
+            let page = document.page(at: result.pageNumber - 1)
+            pdfView.go(to: page!)
+            
+            // Show a brief visual indicator
+            showPageNavigationFeedback(pageNumber: result.pageNumber)
+            
+        } else {
+            print("❌ Could not navigate to search result")
+            showAlert(title: "Navigation Error", message: "Could not navigate to page \(result.pageNumber)")
+        }
+    }
+    
+    private func showPageNavigationFeedback(pageNumber: Int) {
+        // Create a temporary label to show page navigation
+        let feedbackLabel = UILabel()
+        feedbackLabel.text = "Page \(pageNumber)"
+        feedbackLabel.textColor = .white
+        feedbackLabel.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        feedbackLabel.textAlignment = .center
+        feedbackLabel.font = .boldSystemFont(ofSize: 16)
+        feedbackLabel.layer.cornerRadius = 8
+        feedbackLabel.clipsToBounds = true
+        feedbackLabel.translatesAutoresizingMaskIntoConstraints = false
+        
+        view.addSubview(feedbackLabel)
+        
+        NSLayoutConstraint.activate([
+            feedbackLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            feedbackLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            feedbackLabel.widthAnchor.constraint(equalToConstant: 120),
+            feedbackLabel.heightAnchor.constraint(equalToConstant: 40)
+        ])
+        
+        // Animate in and out
+        feedbackLabel.alpha = 0
+        UIView.animate(withDuration: 0.3, animations: {
+            feedbackLabel.alpha = 1
+        }) { _ in
+            UIView.animate(withDuration: 0.3, delay: 1.0, animations: {
+                feedbackLabel.alpha = 0
+            }) { _ in
+                feedbackLabel.removeFromSuperview()
+            }
         }
     }
 }

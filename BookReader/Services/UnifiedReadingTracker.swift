@@ -247,7 +247,9 @@ class UnifiedReadingTracker {
               pageIndex < document.pageCount else { return }
         
         let page = document.page(at: pageIndex)
-        pdfView.go(to: page!)
+        if let page = page {
+            pdfView.go(to: page)
+        }
         
         if let zoomScale = position.zoomScale {
             pdfView.scaleFactor = zoomScale

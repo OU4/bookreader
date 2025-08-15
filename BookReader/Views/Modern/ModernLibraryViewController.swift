@@ -140,8 +140,8 @@ class ModernLibraryViewController: UIViewController {
         setupUI()
         setupObservers()
         
-        // Force initialize FirebaseBookStorage
-        _ = FirebaseBookStorage.shared
+        // Force initialize UnifiedFirebaseStorage
+        _ = UnifiedFirebaseStorage.shared
         
         loadBooks()
         addAnimations()
@@ -255,8 +255,8 @@ class ModernLibraryViewController: UIViewController {
     }
     
     private func setupObservers() {
-        // Observe changes to FirebaseBookStorage books
-        FirebaseBookStorage.shared.$books
+        // Observe changes to UnifiedFirebaseStorage books
+        UnifiedFirebaseStorage.shared.$books
             .receive(on: DispatchQueue.main)
             .sink { [weak self] books in
                 print("📚 Firebase books updated: \(books.count) books")
@@ -424,7 +424,7 @@ class ModernLibraryViewController: UIViewController {
         }
         
         // Use Firebase storage
-        books = FirebaseBookStorage.shared.books
+        books = UnifiedFirebaseStorage.shared.books
         print("DEBUG: Loaded \(books.count) books from Firebase")
         for (index, book) in books.enumerated() {
             print("DEBUG: Book \(index): \(book.title)")
@@ -436,7 +436,7 @@ class ModernLibraryViewController: UIViewController {
         print("DEBUG: Collection view reloaded")
         
         // Observe changes
-        FirebaseBookStorage.shared.$books
+        UnifiedFirebaseStorage.shared.$books
             .receive(on: DispatchQueue.main)
             .sink { [weak self] updatedBooks in
                 self?.books = updatedBooks
@@ -525,6 +525,11 @@ class ModernLibraryViewController: UIViewController {
             self.testFileUpload()
         })
         
+        // Cleanup broken books
+        alertController.addAction(UIAlertAction(title: "Clean Up Broken Books", style: .destructive) { _ in
+            self.cleanupBrokenBooks()
+        })
+        
         // Stats & Goals action
         alertController.addAction(UIAlertAction(title: "Stats & Goals", style: .default) { _ in
             self.showDetailedStats()
@@ -594,6 +599,12 @@ class ModernLibraryViewController: UIViewController {
             }
         }
     }
+    
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
 }
 
 // MARK: - UICollectionViewDataSource
@@ -628,7 +639,9 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
     
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         print("DEBUG: cellForItemAt called for section: \(indexPath.section), item: \(indexPath.item)")
-        let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "ModernBookCell", for: indexPath) as! ModernBookCell
+        guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "ModernBookCell", for: indexPath) as? ModernBookCell else {
+            fatalError("Failed to dequeue ModernBookCell")
+        }
         
         let book: Book
         if indexPath.section == 0 && !getRecentlyReadBooks().isEmpty {
@@ -659,13 +672,21 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
     private func getRecentlyReadBooks() -> [Book] {
         return filteredBooks
             .filter { $0.readingStats.lastReadDate != nil }
-            .sorted(by: { $0.readingStats.lastReadDate! > $1.readingStats.lastReadDate! })
+            .sorted(by: { (book1, book2) in
+                guard let date1 = book1.readingStats.lastReadDate,
+                      let date2 = book2.readingStats.lastReadDate else {
+                    return false
+                }
+                return date1 > date2
+            })
             .prefix(5)
             .map { $0 }
     }
     
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
-        let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "SectionHeader", for: indexPath) as! ModernSectionHeader
+        guard let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "SectionHeader", for: indexPath) as? ModernSectionHeader else {
+            fatalError("Failed to dequeue ModernSectionHeader")
+        }
         
         let recentlyReadBooks = getRecentlyReadBooks()
         
@@ -714,7 +735,7 @@ extension ModernLibraryViewController: UICollectionViewDelegate {
             let loadingAlert = UIAlertController(title: "Loading Book", message: "Downloading from cloud...", preferredStyle: .alert)
             present(loadingAlert, animated: true)
             
-            FirebaseBookStorage.shared.downloadBook(book) { [weak self] result in
+            UnifiedFirebaseStorage.shared.downloadBook(book) { [weak self] result in
                 loadingAlert.dismiss(animated: true) {
                     switch result {
                     case .success(let fileURL):
@@ -797,10 +818,30 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
         }
         
         // Copy file to documents directory first
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let fileName = url.lastPathComponent
-        let destinationURL = documentsPath.appendingPathComponent(fileName)
+        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            print("❌ Could not access documents directory")
+            url.stopAccessingSecurityScopedResource()
+            showAlert(title: "Error", message: "Could not access documents directory")
+            return
+        }
+        // Validate file before processing
+        switch SecurityValidator.validateFileUpload(at: url) {
+        case .failure(let error):
+            print("❌ File validation failed: \(error.localizedDescription)")
+            url.stopAccessingSecurityScopedResource()
+            showAlert(title: "Invalid File", message: error.localizedDescription)
+            return
+        case .success:
+            print("✅ File validation passed")
+        }
         
+        // Sanitize file name to prevent security issues
+        let originalFileName = url.lastPathComponent
+        let sanitizedFileName = SecurityValidator.sanitizeFileName(originalFileName)
+        let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
+        
+        print("📁 Original file name: \(originalFileName)")
+        print("📁 Sanitized file name: \(sanitizedFileName)")
         print("📁 Destination: \(destinationURL)")
         print("📁 Documents directory: \(documentsPath)")
         
@@ -834,6 +875,28 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
                 }
             }()
             
+            // Validate file content based on type
+            switch bookType {
+            case .pdf:
+                if !SecurityValidator.validatePDFContent(at: destinationURL) {
+                    print("❌ Invalid PDF content")
+                    try? FileManager.default.removeItem(at: destinationURL)
+                    url.stopAccessingSecurityScopedResource()
+                    showAlert(title: "Invalid File", message: "The PDF file appears to be corrupted")
+                    return
+                }
+            case .text:
+                if !SecurityValidator.validateTextContent(at: destinationURL) {
+                    print("❌ Invalid text content")
+                    try? FileManager.default.removeItem(at: destinationURL)
+                    url.stopAccessingSecurityScopedResource()
+                    showAlert(title: "Invalid File", message: "The text file could not be read")
+                    return
+                }
+            default:
+                break
+            }
+            
             // Create new book with the copied file path
             let book = Book(
                 title: url.deletingPathExtension().lastPathComponent,
@@ -850,6 +913,20 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
             print("   - FirebaseManager.shared.isAuthenticated: \(FirebaseManager.shared.isAuthenticated)")
             print("   - FirebaseManager.shared.currentUser: \(FirebaseManager.shared.currentUser?.uid ?? "nil")")
             print("   - Auth.auth().currentUser: \(Auth.auth().currentUser?.uid ?? "nil")")
+            
+            // Verify authentication before sensitive operations
+            guard SecurityValidator.requireAuthentication() else {
+                print("❌ User not authenticated! Cannot save to Firebase")
+                showAlert(title: "Authentication Required", message: "Please sign in to upload books")
+                return
+            }
+            
+            // Verify user has permission for upload operation
+            guard SecurityValidator.validateUserPermission(for: "upload_book") else {
+                print("❌ User lacks permission to upload books")
+                showAlert(title: "Permission Denied", message: "You don't have permission to upload books")
+                return
+            }
             
             // Save book IMMEDIATELY while we have access to the file
             if FirebaseManager.shared.isAuthenticated {
@@ -874,11 +951,11 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
                 let bookCopy = book
                 
                 // Use the copied file for Firebase upload
-                FirebaseBookStorage.shared.addBook(bookCopy, fileURL: fileURLCopy) { [weak self] result in
+                UnifiedFirebaseStorage.shared.uploadBook(fileURL: fileURLCopy, title: bookCopy.title, author: bookCopy.author) { [weak self] result in
                     DispatchQueue.main.async {
                         switch result {
-                        case .success(let bookId):
-                            print("✅ Book uploaded successfully with ID: \(bookId)")
+                        case .success(let uploadedBook):
+                            print("✅ Book uploaded successfully with ID: \(uploadedBook.id)")
                             // Show success animation
                             self?.showBookAddedAnimation()
                         case .failure(let error):
@@ -967,7 +1044,11 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
         print("🧪 Testing file upload...")
         
         // Create a test file in documents directory
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            print("❌ Could not access documents directory")
+            showAlert(title: "Error", message: "Could not access documents directory")
+            return
+        }
         let testFileURL = documentsPath.appendingPathComponent("test.txt")
         let testContent = "Hello Firebase Storage Test!"
         
@@ -991,5 +1072,31 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
         } catch {
             print("❌ Failed to create test file: \(error)")
         }
+    }
+    
+    private func cleanupBrokenBooks() {
+        let alert = UIAlertController(title: "Clean Up Broken Books", 
+                                    message: "This will remove all books with missing or invalid files. This action cannot be undone.", 
+                                    preferredStyle: .alert)
+        
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Clean Up", style: .destructive) { _ in
+            UnifiedFirebaseStorage.shared.cleanupBrokenBooks { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let count):
+                        if count > 0 {
+                            self.showAlert(title: "Cleanup Complete", message: "Removed \(count) broken books from your library.")
+                        } else {
+                            self.showAlert(title: "No Issues Found", message: "All your books are working properly!")
+                        }
+                    case .failure(let error):
+                        self.showAlert(title: "Cleanup Failed", message: error.localizedDescription)
+                    }
+                }
+            }
+        })
+        
+        present(alert, animated: true)
     }
 }

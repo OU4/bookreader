@@ -191,7 +191,7 @@ class MigrationViewController: UIViewController {
         
         statusLabel.text = "Starting migration..."
         
-        FirebaseBookStorage.shared.migrateLocalBooks { [weak self] result in
+        UnifiedFirebaseStorage.shared.migrateLocalBooks { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let count):

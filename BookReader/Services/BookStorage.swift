@@ -44,7 +44,7 @@ class BookStorage {
             print("📚 Updated book: \(updatedBook.title) with \(updatedBook.highlights.count) highlights and \(updatedBook.notes.count) notes")
             
             // Also sync to Firebase if available
-            FirebaseBookStorage.shared.updateBook(updatedBook) { result in
+            UnifiedFirebaseStorage.shared.updateBook(updatedBook) { result in
                 switch result {
                 case .success:
                     print("✅ Book synced to Firebase successfully")

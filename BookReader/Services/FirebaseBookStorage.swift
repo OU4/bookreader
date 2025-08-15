@@ -28,14 +28,28 @@ class FirebaseBookStorage: ObservableObject {
     private var isListening = false
     
     // Cache for downloaded files
-    private let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    private let documentsDirectory: URL?
     private let cacheDirectory: URL
     
     // MARK: - Init
     private init() {
-        // Create cache directory
-        cacheDirectory = documentsDirectory.appendingPathComponent("BookCache")
-        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        // Safely get documents directory
+        documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        
+        // Create cache directory with fallback
+        if let documentsDir = documentsDirectory {
+            cacheDirectory = documentsDir.appendingPathComponent("BookCache")
+        } else {
+            // Fallback to temp directory if documents directory is unavailable
+            cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("BookCache")
+            print("⚠️ Using temporary directory for book cache")
+        }
+        
+        do {
+            try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        } catch {
+            print("❌ Failed to create cache directory: \(error)")
+        }
         
         // Listen for auth changes
         setupAuthListener()
@@ -441,5 +455,12 @@ class FirebaseBookStorage: ObservableObject {
         group.notify(queue: .main) {
             completion(.success(migrated))
         }
+    }
+    
+    // MARK: - Cleanup
+    deinit {
+        stopListening()
+        cancellables.removeAll()
+        print("🗑️ FirebaseBookStorage deinitialized")
     }
 }

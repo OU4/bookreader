@@ -27,6 +27,10 @@ class ModernBookReaderViewController: UIViewController {
     private var lastSavedPosition: Float = 0
     private var positionSaveTimer: Timer?
     
+    // MARK: - PDF Highlight Handler
+    private var pdfHighlightHandler: PDFHighlightHandler?
+    private var bookPendingReupload: Book?
+    
     // MARK: - Beautiful UI Components
     private lazy var gradientBackground: CAGradientLayer = {
         let gradient = CAGradientLayer()
@@ -108,8 +112,8 @@ class ModernBookReaderViewController: UIViewController {
     private var imageInteraction: ImageAnalysisInteraction?
     
     // Constraints for animations
-    private var toolbarBottomConstraint: NSLayoutConstraint!
-    private var headerTopConstraint: NSLayoutConstraint!
+    private var toolbarBottomConstraint: NSLayoutConstraint?
+    private var headerTopConstraint: NSLayoutConstraint?
     
     // MARK: - Lifecycle
     override func viewDidLoad() {
@@ -136,6 +140,11 @@ class ModernBookReaderViewController: UIViewController {
         // Start reading session only when view is visible and has content
         if currentBook != nil && (!textView.isHidden || (pdfView?.isHidden == false)) {
             startReadingSession()
+            
+            // Refresh highlights when returning to PDF view
+            if pdfView?.isHidden == false {
+                pdfHighlightHandler?.refreshHighlights()
+            }
         }
     }
     
@@ -213,12 +222,14 @@ class ModernBookReaderViewController: UIViewController {
         // Header
         headerTopConstraint = navigationHeader.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
         
-        NSLayoutConstraint.activate([
-            headerTopConstraint,
-            navigationHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            navigationHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            navigationHeader.heightAnchor.constraint(equalToConstant: 60)
-        ])
+        if let headerTopConstraint = headerTopConstraint {
+            NSLayoutConstraint.activate([
+                headerTopConstraint,
+                navigationHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                navigationHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                navigationHeader.heightAnchor.constraint(equalToConstant: 60)
+            ])
+        }
         
         // Text View
         NSLayoutConstraint.activate([
@@ -239,12 +250,14 @@ class ModernBookReaderViewController: UIViewController {
         // Floating Toolbar
         toolbarBottomConstraint = floatingToolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16)
         
-        NSLayoutConstraint.activate([
-            floatingToolbar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            toolbarBottomConstraint,
-            floatingToolbar.heightAnchor.constraint(equalToConstant: 60),
-            floatingToolbar.widthAnchor.constraint(greaterThanOrEqualToConstant: 320)
-        ])
+        if let toolbarBottomConstraint = toolbarBottomConstraint {
+            NSLayoutConstraint.activate([
+                floatingToolbar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                toolbarBottomConstraint,
+                floatingToolbar.heightAnchor.constraint(equalToConstant: 60),
+                floatingToolbar.widthAnchor.constraint(greaterThanOrEqualToConstant: 320)
+            ])
+        }
         
         // Settings Panel
         NSLayoutConstraint.activate([
@@ -263,13 +276,13 @@ class ModernBookReaderViewController: UIViewController {
     
     private func applyInitialAnimations() {
         // Start with toolbar hidden
-        toolbarBottomConstraint.constant = 100
-        headerTopConstraint.constant = -80
+        toolbarBottomConstraint?.constant = 100
+        headerTopConstraint?.constant = -80
         
         // Animate in
         UIView.animate(withDuration: 0.8, delay: 0.3, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.5) {
-            self.toolbarBottomConstraint.constant = -16
-            self.headerTopConstraint.constant = 0
+            self.toolbarBottomConstraint?.constant = -16
+            self.headerTopConstraint?.constant = 0
             self.view.layoutIfNeeded()
         }
     }
@@ -427,8 +440,8 @@ class ModernBookReaderViewController: UIViewController {
         let targetAlphaProgress: CGFloat = isToolbarVisible ? 1 : 0
         
         UIView.animate(withDuration: 0.6, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.5) {
-            self.toolbarBottomConstraint.constant = targetConstantToolbar
-            self.headerTopConstraint.constant = targetConstantHeader
+            self.toolbarBottomConstraint?.constant = targetConstantToolbar
+            self.headerTopConstraint?.constant = targetConstantHeader
             self.readingProgressView.alpha = targetAlphaProgress
             self.view.layoutIfNeeded()
         }
@@ -709,15 +722,51 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     private func loadBookContent(_ book: Book) {
+        print("📖 Selected book: \(book.title)")
+        print("📂 File path: \(book.filePath)")
+        print("📄 File exists: \(FileManager.default.fileExists(atPath: book.filePath))")
+        
         // Show loading animation
         showLoadingAnimation()
         
+        // Check if filePath is empty
+        if book.filePath.isEmpty {
+            print("❌ Book has empty filePath - offering to re-upload")
+            hideLoadingAnimation()
+            showBookReuploadOption(for: book)
+            return
+        }
+        
+        // Check if this is a Firebase URL that needs to be downloaded
+        if book.filePath.starts(with: "https://") {
+            print("🔄 Downloading book from Firebase...")
+            UnifiedFirebaseStorage.shared.downloadBook(book) { [weak self] result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let localURL):
+                        print("✅ Book downloaded to: \(localURL.path)")
+                        // Load content from local file
+                        self?.loadContentFromLocalFile(book, localPath: localURL.path)
+                    case .failure(let error):
+                        print("❌ Failed to download book: \(error)")
+                        self?.hideLoadingAnimation()
+                        self?.showErrorMessage("Failed to download book: \(error.localizedDescription)")
+                    }
+                }
+            }
+        } else {
+            // Load content directly from local file
+            loadContentFromLocalFile(book, localPath: book.filePath)
+        }
+    }
+    
+    private func loadContentFromLocalFile(_ book: Book, localPath: String) {
         // Load content based on book type
         switch book.type {
         case .pdf:
-            loadPDFContent(from: book.filePath)
+            loadPDFContent(from: localPath)
         case .text, .epub:
-            loadTextContent(from: book.filePath)
+            loadTextContent(from: localPath)
         case .image:
             showImageNotSupported()
         }
@@ -884,6 +933,9 @@ class ModernBookReaderViewController: UIViewController {
         pdfV.autoScales = false // Start with manual scaling
         pdfV.interpolationQuality = .low // Use low for better performance
         
+        // Enable text selection and interaction
+        pdfV.isUserInteractionEnabled = true
+        
         // Enable page navigation
         pdfV.pageShadowsEnabled = true
         pdfV.pageBreakMargins = UIEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
@@ -902,6 +954,12 @@ class ModernBookReaderViewController: UIViewController {
         pdfV.delegate = self
         
         self.pdfView = pdfV
+        
+        // Setup PDF highlight handler
+        if let book = currentBook {
+            pdfHighlightHandler = PDFHighlightHandler(pdfView: pdfV, bookId: book.id)
+            pdfHighlightHandler?.delegate = self
+        }
         
         // Temporarily disable LiveText overlay - it's blocking UI interactions
         // Will re-enable after fixing gesture handling
@@ -977,14 +1035,8 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     private func loadExistingHighlights() {
-        guard let book = currentBook,
-              let pdfView = pdfView else { return }
-        
-        // Load existing highlights (keeping existing highlight manager for now)
-        ReadingPositionManager.shared.applyHighlights(to: pdfView, bookId: book.id)
-        
-        // Force PDF view to refresh
-        pdfView.layoutDocumentView()
+        // The PDFHighlightHandler will load existing highlights
+        pdfHighlightHandler?.loadExistingHighlights()
     }
     
     private func hideLoadingAnimation() {
@@ -1037,6 +1089,33 @@ class ModernBookReaderViewController: UIViewController {
         readingProgressView.setProgress(progress, animated: true)
     }
     
+    private func showBookReuploadOption(for book: Book) {
+        let alert = UIAlertController(
+            title: "File Missing", 
+            message: "The file for '\(book.title)' is not available. Would you like to upload a new file for this book?", 
+            preferredStyle: .alert
+        )
+        
+        alert.addAction(UIAlertAction(title: "Choose File", style: .default) { [weak self] _ in
+            self?.showDocumentPicker(for: book)
+        })
+        
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        
+        present(alert, animated: true)
+    }
+    
+    private func showDocumentPicker(for book: Book) {
+        let documentPicker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf])
+        documentPicker.delegate = self
+        documentPicker.allowsMultipleSelection = false
+        
+        // Store the book reference for later use
+        bookPendingReupload = book
+        
+        present(documentPicker, animated: true)
+    }
+    
     private func showErrorMessage(_ message: String) {
         let alert = UIAlertController(title: "📚 Book Reader", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
@@ -1047,6 +1126,47 @@ class ModernBookReaderViewController: UIViewController {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
+    }
+    
+    private func showQuickHint(_ message: String) {
+        let hintLabel = UILabel()
+        hintLabel.text = message
+        hintLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        hintLabel.textColor = .white
+        hintLabel.backgroundColor = UIColor.black.withAlphaComponent(0.8)
+        hintLabel.textAlignment = .center
+        hintLabel.layer.cornerRadius = 20
+        hintLabel.clipsToBounds = true
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        
+        view.addSubview(hintLabel)
+        
+        NSLayoutConstraint.activate([
+            hintLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            hintLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -100),
+            hintLabel.heightAnchor.constraint(equalToConstant: 40),
+            hintLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
+        ])
+        
+        // Add padding
+        hintLabel.layoutMargins = UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)
+        
+        // Animate in
+        hintLabel.alpha = 0
+        hintLabel.transform = CGAffineTransform(translationX: 0, y: 20)
+        
+        UIView.animate(withDuration: 0.3, animations: {
+            hintLabel.alpha = 1
+            hintLabel.transform = .identity
+        }) { _ in
+            // Animate out after delay
+            UIView.animate(withDuration: 0.3, delay: 2.0, animations: {
+                hintLabel.alpha = 0
+                hintLabel.transform = CGAffineTransform(translationX: 0, y: 20)
+            }) { _ in
+                hintLabel.removeFromSuperview()
+            }
+        }
     }
 }
 
@@ -1147,6 +1267,13 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
         viewBookmarksAction.setValue(UIImage(systemName: "list.bullet.rectangle"), forKey: "image")
         actionSheet.addAction(viewBookmarksAction)
         
+        // Notes & Highlights
+        let notesAction = UIAlertAction(title: "Notes & Highlights", style: .default) { [weak self] _ in
+            self?.didTapNotes()
+        }
+        notesAction.setValue(UIImage(systemName: "highlighter"), forKey: "image")
+        actionSheet.addAction(notesAction)
+        
         // Settings
         let settingsAction = UIAlertAction(title: "Reading Settings", style: .default) { [weak self] _ in
             self?.showSettings()
@@ -1217,238 +1344,45 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
     }
     
     func didTapHighlight() {
-        // Enable PDF text selection and highlighting
         guard let pdfView = pdfView, !pdfView.isHidden else {
             showAlert(title: "Highlighting", message: "Highlighting is only available for PDF files")
             return
         }
         
-        // Check if there's already selected text
-        if let currentSelection = pdfView.currentSelection, !(currentSelection.string?.isEmpty ?? true) {
-            // There's already selected text, show color picker to highlight it
-            showHighlightColorPickerForSelection(currentSelection)
+        // Check if there's any selected text first
+        if let selection = pdfView.currentSelection, !(selection.string?.isEmpty ?? true) {
+            // There's selected text - show highlight options immediately
+            pdfHighlightHandler?.showHighlightOptions(for: selection)
         } else {
-            // No selection, enter highlighting mode
-            showHighlightColorPicker()
+            // No selected text - show instruction
+            showQuickHint("Select text by tapping and dragging, then use this button to highlight")
+            
+            // Ensure PDFView is properly configured for text selection
+            pdfView.isUserInteractionEnabled = true
+            
+            // Visual feedback for the highlight button
+            floatingToolbar.setHighlightMode(active: true)
+            
+            // Auto-deactivate highlight mode after a few seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                self.floatingToolbar.setHighlightMode(active: false)
+            }
         }
         
-        print("🖍️ Highlighting mode enabled - select text in PDF to highlight")
+        print("🖍️ PDF highlighting mode activated")
     }
     
     func didTapBookmarks() {
         showBookmarkSidebar()
     }
     
-    private func showHighlightColorPickerForSelection(_ selection: PDFSelection) {
-        let alert = UIAlertController(title: "Highlight Selected Text", 
-                                    message: "Choose a color to highlight:\n\"\(selection.string?.prefix(50) ?? "")...\"", 
-                                    preferredStyle: .actionSheet)
-        
-        // Add color options
-        let colors: [(String, UIColor)] = [
-            ("Yellow", .systemYellow),
-            ("Green", .systemGreen),
-            ("Pink", .systemPink),
-            ("Blue", .systemBlue),
-            ("Orange", .systemOrange)
-        ]
-        
-        for (name, color) in colors {
-            let action = UIAlertAction(title: name, style: .default) { [weak self] _ in
-                // Store color and highlight immediately
-                objc_setAssociatedObject(self, &AssociatedKeys.highlightColor, color, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-                self?.highlightSelection(selection)
-            }
-            alert.addAction(action)
-        }
-        
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-            self?.pdfView?.clearSelection()
-        })
-        
-        // For iPad
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = floatingToolbar
-            popover.sourceRect = floatingToolbar.bounds
-        }
-        
-        present(alert, animated: true)
-    }
     
-    private func showHighlightColorPicker() {
-        let alert = UIAlertController(title: "Select Highlight Color", message: "Choose a color, then select text in the PDF to highlight", preferredStyle: .actionSheet)
-        
-        // Add color options
-        let colors: [(String, UIColor)] = [
-            ("Yellow", .systemYellow),
-            ("Green", .systemGreen),
-            ("Pink", .systemPink),
-            ("Blue", .systemBlue),
-            ("Orange", .systemOrange)
-        ]
-        
-        for (name, color) in colors {
-            let action = UIAlertAction(title: name, style: .default) { [weak self] _ in
-                self?.enableHighlightingMode(color: color)
-            }
-            alert.addAction(action)
-        }
-        
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        
-        // For iPad
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = floatingToolbar
-            popover.sourceRect = floatingToolbar.bounds
-        }
-        
-        present(alert, animated: true)
-    }
     
-    private func enableHighlightingMode(color: UIColor) {
-        guard let pdfView = pdfView else { return }
-        
-        // Store the highlight color
-        objc_setAssociatedObject(self, &AssociatedKeys.highlightColor, color, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        
-        // Enable text selection - this allows native PDF text selection
-        pdfView.isUserInteractionEnabled = true
-        
-        // Clear any existing gesture recognizers to avoid conflicts
-        for gesture in pdfView.gestureRecognizers ?? [] {
-            if gesture is UILongPressGestureRecognizer && gesture.view == pdfView {
-                pdfView.removeGestureRecognizer(gesture)
-            }
-        }
-        
-        // Add a simple tap gesture to check for selections
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handlePDFTap(_:)))
-        tapGesture.numberOfTapsRequired = 1
-        pdfView.addGestureRecognizer(tapGesture)
-        
-        showAlert(title: "Highlighting Active", message: "Double-tap on text to select it, then use the highlight button again to apply the color.")
-        
-        // Set a flag to indicate highlighting mode is active
-        objc_setAssociatedObject(self, &AssociatedKeys.highlightingMode, true, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-    }
     
-    @objc private func handlePDFTap(_ gesture: UITapGestureRecognizer) {
-        guard let pdfView = pdfView else { return }
-        
-        // Check if there's a current selection
-        if let currentSelection = pdfView.currentSelection, !(currentSelection.string?.isEmpty ?? true) {
-            // Show option to highlight the selected text
-            let alert = UIAlertController(title: "Highlight Selected Text?", 
-                                        message: "\"\(currentSelection.string?.prefix(50) ?? "")...\"", 
-                                        preferredStyle: .alert)
-            
-            alert.addAction(UIAlertAction(title: "Highlight", style: .default) { [weak self] _ in
-                self?.highlightSelection(currentSelection)
-            })
-            
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-                self?.pdfView?.clearSelection()
-            })
-            
-            present(alert, animated: true)
-        }
-    }
     
-    @objc private func handlePDFLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began,
-              let pdfView = pdfView,
-              let page = pdfView.page(for: gesture.location(in: pdfView), nearest: true) else { return }
-        
-        let locationOnPage = pdfView.convert(gesture.location(in: pdfView), to: page)
-        
-        // Try to find text at this location
-        if let selection = page.selection(for: CGRect(origin: locationOnPage, size: CGSize(width: 10, height: 10))) {
-            pdfView.setCurrentSelection(selection, animate: true)
-            
-            // Show highlight menu
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.showHighlightMenu(for: selection)
-            }
-        }
-    }
     
-    private func showHighlightMenu(for selection: PDFSelection) {
-        let alert = UIAlertController(title: "Highlight Text", message: "Selected: \"\(selection.string?.prefix(50) ?? "")...\"", preferredStyle: .alert)
-        
-        alert.addAction(UIAlertAction(title: "Highlight", style: .default) { [weak self] _ in
-            self?.highlightSelection(selection)
-        })
-        
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
-            self?.pdfView?.clearSelection()
-        })
-        
-        present(alert, animated: true)
-    }
     
-    private func highlightSelection(_ selection: PDFSelection) {
-        guard let book = currentBook,
-              let selectedText = selection.string,
-              let color = objc_getAssociatedObject(self, &AssociatedKeys.highlightColor) as? UIColor,
-              let pdfView = pdfView else { return }
-        
-        // Keep using professional highlight manager for highlights (not part of unified tracker)
-        if let pdfHighlight = ReadingPositionManager.shared.saveHighlight(for: book.id, selection: selection, color: color) {
-            
-            // Apply the highlight visually to the PDF
-            ReadingPositionManager.shared.applyHighlights(to: pdfView, bookId: book.id)
-            
-            // Also save to legacy systems for compatibility
-            if let page = selection.pages.first,
-               let pageIndex = pdfView.document?.index(for: page) {
-                
-                // Create highlight object for BookStorage
-                let highlightObj = Highlight(
-                    text: selectedText,
-                    color: colorToHighlightColor(color),
-                    position: TextPosition(
-                        startOffset: 0,
-                        endOffset: selectedText.count,
-                        chapter: nil,
-                        pageNumber: pageIndex + 1
-                    )
-                )
-                
-                // Save to both legacy storage systems
-                if var updatedBook = currentBook {
-                    updatedBook.highlights.append(highlightObj)
-                    BookStorage.shared.updateBook(updatedBook)
-                    self.currentBook = updatedBook
-                    
-                    NotesManager.shared.addHighlight(
-                        to: updatedBook.id,
-                        text: selectedText,
-                        color: colorToHighlightColor(color),
-                        position: highlightObj.position
-                    )
-                }
-            }
-            
-            print("🖍️ Created professional highlight with exact coordinates")
-        }
-        
-        // Clear selection
-        pdfView.clearSelection()
-        
-        // Show success message
-        showAlert(title: "Highlighted", message: "Text has been highlighted successfully!")
-    }
     
-    private func colorToHighlightColor(_ color: UIColor) -> Highlight.HighlightColor {
-        switch color {
-        case .systemYellow: return .yellow
-        case .systemGreen: return .green
-        case .systemPink: return .pink
-        case .systemBlue: return .blue
-        case .systemOrange: return .orange
-        default: return .yellow
-        }
-    }
     
     func didTapNotes() {
         // Show notes and highlights interface
@@ -1567,11 +1501,21 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
     }
 }
 
-// MARK: - Associated Keys
-private struct AssociatedKeys {
-    static var highlightColor = "highlightColor"
-    static var highlightingMode = "highlightingMode"
-    static var highlights = "highlights"
+// MARK: - PDFHighlightHandlerDelegate
+extension ModernBookReaderViewController: PDFHighlightHandlerDelegate {
+    func pdfHighlightHandler(_ handler: PDFHighlightHandler, didCreateHighlight highlight: Highlight) {
+        showQuickHint("✨ Highlighted!")
+        updateToolbarButtonStates()
+    }
+    
+    func pdfHighlightHandler(_ handler: PDFHighlightHandler, didFailWithError error: Error) {
+        showAlert(title: "Error", message: "Failed to create highlight: \(error.localizedDescription)")
+    }
+    
+    private func updateToolbarButtonStates() {
+        // Update any toolbar button states if needed
+        // This is a placeholder for future toolbar updates
+    }
 }
 
 // MARK: - Reading Session Management
@@ -1970,5 +1914,85 @@ extension ModernBookReaderViewController: BookSearchDelegate {
                 feedbackLabel.removeFromSuperview()
             }
         }
+    }
+}
+
+// MARK: - UIDocumentPickerDelegate
+extension ModernBookReaderViewController: UIDocumentPickerDelegate {
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let selectedURL = urls.first else { return }
+        
+        print("📁 Selected file for re-upload: \(selectedURL)")
+        
+        // Find the book that needs re-uploading
+        guard let bookToUpdate = bookPendingReupload else {
+            showErrorMessage("Could not identify which book to update")
+            return
+        }
+        
+        // Clear the pending reupload reference
+        bookPendingReupload = nil
+        
+        // Start accessing the security-scoped resource
+        guard selectedURL.startAccessingSecurityScopedResource() else {
+            showErrorMessage("Unable to access the selected file")
+            return
+        }
+        
+        defer { selectedURL.stopAccessingSecurityScopedResource() }
+        
+        // Copy file to documents directory
+        // Validate file before processing
+        switch SecurityValidator.validateFileUpload(at: selectedURL) {
+        case .failure(let error):
+            print("❌ File validation failed: \(error.localizedDescription)")
+            self.showQuickHint("Invalid file: \(error.localizedDescription)")
+            return
+        case .success:
+            print("✅ File validation passed")
+        }
+        
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let sanitizedFileName = SecurityValidator.sanitizeFileName(selectedURL.lastPathComponent)
+        let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
+        
+        do {
+            // Remove existing file if it exists
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            
+            // Copy the file
+            try FileManager.default.copyItem(at: selectedURL, to: destinationURL)
+            
+            // Upload to Firebase and update the book
+            UnifiedFirebaseStorage.shared.uploadBook(
+                fileURL: destinationURL, 
+                title: bookToUpdate.title, 
+                author: bookToUpdate.author
+            ) { [weak self] result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let updatedBook):
+                        print("✅ Book re-uploaded successfully: \(updatedBook.title)")
+                        // Update the current book with new file path
+                        self?.currentBook = updatedBook
+                        // Try loading the book again
+                        self?.loadBookContent(updatedBook)
+                    case .failure(let error):
+                        print("❌ Failed to re-upload book: \(error)")
+                        self?.showErrorMessage("Failed to upload file: \(error.localizedDescription)")
+                    }
+                }
+            }
+            
+        } catch {
+            showErrorMessage("Error copying file: \(error.localizedDescription)")
+        }
+    }
+    
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        print("📁 Document picker cancelled")
+        bookPendingReupload = nil // Clear the reference
     }
 }

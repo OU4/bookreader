@@ -52,7 +52,7 @@ class ModernFloatingToolbar: UIView {
     )
     
     private lazy var bookmarksButton = createModernButton(
-        icon: "bookmark.fill",
+        icon: "bookmark.circle.fill",
         action: #selector(bookmarksTapped)
     )
     
@@ -113,17 +113,21 @@ class ModernFloatingToolbar: UIView {
     private func createModernButton(icon: String, action: Selector) -> UIButton {
         let button = UIButton(type: .system)
         
-        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .medium, scale: .medium)
         button.setImage(UIImage(systemName: icon, withConfiguration: config), for: .normal)
         button.tintColor = .label
         
-        button.backgroundColor = UIColor.label.withAlphaComponent(0.08)
-        button.layer.cornerRadius = 20
+        button.backgroundColor = UIColor.label.withAlphaComponent(0.1)
+        button.layer.cornerRadius = 22
         button.translatesAutoresizingMaskIntoConstraints = false
         
+        // Add subtle border for better visibility
+        button.layer.borderWidth = 0.5
+        button.layer.borderColor = UIColor.label.withAlphaComponent(0.2).cgColor
+        
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 40),
-            button.heightAnchor.constraint(equalToConstant: 40)
+            button.widthAnchor.constraint(equalToConstant: 44),
+            button.heightAnchor.constraint(equalToConstant: 44)
         ])
         
         button.addTarget(self, action: action, for: .touchUpInside)
@@ -157,7 +161,7 @@ class ModernFloatingToolbar: UIView {
     @objc private func buttonTouchUp(_ sender: UIButton) {
         UIView.animate(withDuration: 0.2, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.5, options: [.allowUserInteraction]) {
             sender.transform = .identity
-            sender.backgroundColor = UIColor.label.withAlphaComponent(0.08)
+            sender.backgroundColor = UIColor.label.withAlphaComponent(0.1)
         }
     }
     
@@ -170,6 +174,23 @@ class ModernFloatingToolbar: UIView {
     @objc private func highlightTapped() {
         animateButtonPress(highlightButton)
         delegate?.didTapHighlight()
+    }
+    
+    // Method to show highlight mode state
+    func setHighlightMode(active: Bool) {
+        UIView.animate(withDuration: 0.3) {
+            if active {
+                // Highlight mode is active - make button more prominent
+                self.highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.3)
+                self.highlightButton.tintColor = .systemOrange
+                self.highlightButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
+            } else {
+                // Normal state
+                self.highlightButton.backgroundColor = UIColor.white.withAlphaComponent(0.15)
+                self.highlightButton.tintColor = .label
+                self.highlightButton.transform = .identity
+            }
+        }
     }
     
     @objc private func bookmarksTapped() {
@@ -213,14 +234,41 @@ class ModernFloatingToolbar: UIView {
         }
     }
     
+    // MARK: - Content Updates
+    func updateHighlightButtonState(hasHighlights: Bool) {
+        UIView.animate(withDuration: 0.2) {
+            if hasHighlights {
+                self.highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.3)
+                self.highlightButton.tintColor = UIColor.systemOrange
+            } else {
+                self.highlightButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
+                self.highlightButton.tintColor = .label
+            }
+        }
+    }
+    
+    func updateBookmarkButtonState(hasBookmarks: Bool) {
+        UIView.animate(withDuration: 0.2) {
+            if hasBookmarks {
+                self.bookmarksButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.3)
+                self.bookmarksButton.tintColor = UIColor.systemBlue
+            } else {
+                self.bookmarksButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
+                self.bookmarksButton.tintColor = .label
+            }
+        }
+    }
+    
     // MARK: - Theme Updates
     func updateTheme(_ theme: ReadingTheme) {
         UIView.animate(withDuration: 0.3) {
-            let buttonColor = theme.isDarkMode ? UIColor.white.withAlphaComponent(0.1) : UIColor.black.withAlphaComponent(0.08)
+            let buttonColor = theme.isDarkMode ? UIColor.white.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.1)
+            let borderColor = theme.isDarkMode ? UIColor.white.withAlphaComponent(0.25) : UIColor.black.withAlphaComponent(0.2)
             
             [self.libraryButton, self.highlightButton, self.bookmarksButton, 
              self.moreButton].forEach { button in
                 button.backgroundColor = buttonColor
+                button.layer.borderColor = borderColor.cgColor
             }
         }
     }

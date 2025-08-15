@@ -166,7 +166,10 @@ class ReadingPositionManager {
         }
         lastSaveTime[bookId] = now
         
-        let visibleRange = textView.visibleRange
+        // Calculate visible character position based on scroll position
+        let visiblePoint = CGPoint(x: 0, y: textView.contentOffset.y)
+        let visibleCharacterIndex = textView.characterRange(at: visiblePoint)?.start ?? textView.beginningOfDocument
+        let visibleLocation = textView.offset(from: textView.beginningOfDocument, to: visibleCharacterIndex)
         let scrollPercentage = Float(textView.contentOffset.y / max(textView.contentSize.height - textView.bounds.height, 1))
         
         let position = ReadingPosition(
@@ -179,7 +182,7 @@ class ReadingPositionManager {
             pageBounds: nil,
             viewBounds: nil,
             displayMode: nil,
-            textOffset: visibleRange.location,
+            textOffset: visibleLocation,
             scrollPercentage: scrollPercentage,
             totalPages: nil,
             readingProgress: scrollPercentage,
@@ -187,7 +190,6 @@ class ReadingPositionManager {
         )
         
         savePosition(position)
-        print("📍 Saved text position: Offset \(visibleRange.location), scroll: \(Int(scrollPercentage * 100))%")
     }
     
     /// Force save text position (e.g., when app goes to background)
@@ -518,37 +520,17 @@ class ReadingPositionManager {
 
 // MARK: - Helper Extensions
 
-extension UITextView {
-    var visibleRange: NSRange {
-        let bounds = self.bounds
-        let origin = CGPoint(x: bounds.minX, y: bounds.minY)
-        let size = bounds.size
-        
-        let textContainer = self.textContainer
-        let layoutManager = self.layoutManager
-        let textStorage = self.textStorage
-        
-        let visibleRect = CGRect(origin: origin, size: size)
-        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
-        let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-        
-        return characterRange
-    }
-}
-
 extension UIColor {
     var hexString: String {
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
         
-        getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        getRed(&r, green: &g, blue: &b, alpha: &a)
         
-        return String(format: "#%02X%02X%02X", 
-                     Int(red * 255), 
-                     Int(green * 255), 
-                     Int(blue * 255))
+        let rgb: Int = (Int)(r*255)<<16 | (Int)(g*255)<<8 | (Int)(b*255)<<0
+        
+        return String(format: "#%06x", rgb)
     }
-    
 }

@@ -78,6 +78,7 @@ class NotesAndHighlightsViewController: UIViewController {
         setupUI()
         loadData()
         setupNotifications()
+        setupFirebaseListener()
     }
     
     override func viewWillDisappear(_ animated: Bool) {
@@ -96,7 +97,15 @@ class NotesAndHighlightsViewController: UIViewController {
             action: #selector(dismissViewController)
         )
         
-        navigationItem.rightBarButtonItems = [exportButton, addNoteButton]
+        // Add refresh button
+        let refreshButton = UIBarButtonItem(
+            image: UIImage(systemName: "arrow.clockwise"),
+            style: .plain,
+            target: self,
+            action: #selector(refreshData)
+        )
+        
+        navigationItem.rightBarButtonItems = [exportButton, addNoteButton, refreshButton]
         
         view.addSubview(segmentedControl)
         view.addSubview(searchBar)
@@ -134,11 +143,87 @@ class NotesAndHighlightsViewController: UIViewController {
         )
     }
     
+    private func setupFirebaseListener() {
+        // Listen for Firebase books updates
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(firebaseBooksUpdated),
+            name: NSNotification.Name("FirebaseBooksUpdated"),
+            object: nil
+        )
+    }
+    
+    @objc private func firebaseBooksUpdated() {
+        print("🔄 Firebase books updated, reloading highlights...")
+        loadData()
+    }
+    
+    @objc private func refreshData() {
+        print("🔄 Manual refresh triggered")
+        loadData()
+    }
+    
     // MARK: - Data Loading
     private func loadData() {
-        highlights = NotesManager.shared.getHighlights(for: bookId)
+        // Load highlights from Firebase first
+        loadHighlightsFromFirebase()
+        
+        // Load notes from NotesManager (keeping this for now)
         notes = NotesManager.shared.getNotes(for: bookId)
         updateFilteredData()
+    }
+    
+    private func loadHighlightsFromFirebase() {
+        // Get highlights from UnifiedFirebaseStorage
+        let firebaseBooks = UnifiedFirebaseStorage.shared.books
+        print("🔍 Looking for book ID: \(bookId)")
+        print("🔍 Available books in Firebase: \(firebaseBooks.map { $0.id })")
+        
+        if let book = firebaseBooks.first(where: { $0.id == bookId }) {
+            highlights = book.highlights
+            print("📚 Loaded \(highlights.count) highlights from Firebase for book \(bookId)")
+        } else {
+            highlights = []
+            print("⚠️ No book found in Firebase with ID \(bookId)")
+            print("⚠️ Available book IDs: \(firebaseBooks.map { $0.id })")
+            
+            // Try to find book with similar title as fallback
+            if let currentBookTitle = getCurrentBookTitle() {
+                print("🔍 Trying to match by title: \(currentBookTitle)")
+                if let matchedBook = firebaseBooks.first(where: { $0.title == currentBookTitle }) {
+                    highlights = matchedBook.highlights
+                    print("📚 Found book by title match: \(matchedBook.id) with \(highlights.count) highlights")
+                }
+            }
+        }
+        
+        // Also load highlights from local NotesManager for compatibility
+        let localHighlights = NotesManager.shared.getHighlights(for: bookId)
+        print("📚 Loaded \(localHighlights.count) local highlights from NotesManager")
+        
+        // Merge highlights (avoid duplicates by checking text and position)
+        for localHighlight in localHighlights {
+            let isDuplicate = highlights.contains { firebaseHighlight in
+                firebaseHighlight.text == localHighlight.text &&
+                firebaseHighlight.position.startOffset == localHighlight.position.startOffset
+            }
+            
+            if !isDuplicate {
+                highlights.append(localHighlight)
+            }
+        }
+        
+        print("📚 Total highlights after merging: \(highlights.count)")
+    }
+    
+    private func getCurrentBookTitle() -> String? {
+        // Try to get the current book title from various sources
+        if let bookTitle = UserDefaults.standard.string(forKey: "currentBookTitle") {
+            return bookTitle
+        }
+        
+        // Could also try to extract from any other available source
+        return nil
     }
     
     private func updateFilteredData() {
@@ -270,11 +355,21 @@ extension NotesAndHighlightsViewController: UITableViewDataSource, UITableViewDe
     
     func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch currentSegment {
-        case 0: return filteredHighlights.isEmpty ? nil : "Highlights (\(filteredHighlights.count))"
-        case 1: return filteredNotes.isEmpty ? nil : "Notes (\(filteredNotes.count))"
+        case 0: 
+            if filteredHighlights.isEmpty {
+                return "No Highlights Found - Tap Refresh ↻"
+            } else {
+                return "Highlights (\(filteredHighlights.count))"
+            }
+        case 1: 
+            return filteredNotes.isEmpty ? nil : "Notes (\(filteredNotes.count))"
         case 2:
             if section == 0 {
-                return filteredHighlights.isEmpty ? nil : "Highlights (\(filteredHighlights.count))"
+                if filteredHighlights.isEmpty {
+                    return "No Highlights Found - Tap Refresh ↻"
+                } else {
+                    return "Highlights (\(filteredHighlights.count))"
+                }
             } else {
                 return filteredNotes.isEmpty ? nil : "Notes (\(filteredNotes.count))"
             }
@@ -285,22 +380,30 @@ extension NotesAndHighlightsViewController: UITableViewDataSource, UITableViewDe
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         switch currentSegment {
         case 0: // Highlights only
-            let cell = tableView.dequeueReusableCell(withIdentifier: "HighlightCell", for: indexPath) as! HighlightCell
+            guard let cell = tableView.dequeueReusableCell(withIdentifier: "HighlightCell", for: indexPath) as? HighlightCell else {
+                fatalError("Failed to dequeue HighlightCell")
+            }
             cell.configure(with: filteredHighlights[indexPath.row])
             return cell
             
         case 1: // Notes only
-            let cell = tableView.dequeueReusableCell(withIdentifier: "NoteCell", for: indexPath) as! NoteCell
+            guard let cell = tableView.dequeueReusableCell(withIdentifier: "NoteCell", for: indexPath) as? NoteCell else {
+                fatalError("Failed to dequeue NoteCell")
+            }
             cell.configure(with: filteredNotes[indexPath.row])
             return cell
             
         case 2: // Both
             if indexPath.section == 0 {
-                let cell = tableView.dequeueReusableCell(withIdentifier: "HighlightCell", for: indexPath) as! HighlightCell
+                guard let cell = tableView.dequeueReusableCell(withIdentifier: "HighlightCell", for: indexPath) as? HighlightCell else {
+                fatalError("Failed to dequeue HighlightCell")
+            }
                 cell.configure(with: filteredHighlights[indexPath.row])
                 return cell
             } else {
-                let cell = tableView.dequeueReusableCell(withIdentifier: "NoteCell", for: indexPath) as! NoteCell
+                guard let cell = tableView.dequeueReusableCell(withIdentifier: "NoteCell", for: indexPath) as? NoteCell else {
+                fatalError("Failed to dequeue NoteCell")
+            }
                 cell.configure(with: filteredNotes[indexPath.row])
                 return cell
             }
@@ -377,8 +480,22 @@ extension NotesAndHighlightsViewController: UITableViewDataSource, UITableViewDe
         })
         
         alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
-            NotesManager.shared.removeHighlight(id: highlight.id, from: self?.bookId ?? "")
-            self?.loadData()
+            guard let self = self else { return }
+            
+            UnifiedFirebaseStorage.shared.removeHighlight(bookId: self.bookId, highlightId: highlight.id) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        print("✅ Highlight deleted successfully")
+                        self.loadData()
+                    case .failure(let error):
+                        print("❌ Failed to delete highlight: \(error)")
+                        let errorAlert = UIAlertController(title: "Error", message: "Failed to delete highlight: \(error.localizedDescription)", preferredStyle: .alert)
+                        errorAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                        self.present(errorAlert, animated: true)
+                    }
+                }
+            }
         })
         
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -414,9 +531,34 @@ extension NotesAndHighlightsViewController: UITableViewDataSource, UITableViewDe
         }
         
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            let note = alert.textFields?.first?.text ?? ""
-            NotesManager.shared.updateHighlight(id: highlight.id, in: self?.bookId ?? "", note: note)
-            self?.loadData()
+            guard let self = self else { return }
+            let noteText = alert.textFields?.first?.text ?? ""
+            
+            // Create updated highlight with new note
+            let updatedHighlight = Highlight(
+                id: highlight.id,
+                text: highlight.text,
+                color: highlight.color,
+                position: highlight.position,
+                note: noteText.isEmpty ? nil : noteText,
+                dateCreated: highlight.dateCreated
+            )
+            
+            // Update in Firebase
+            UnifiedFirebaseStorage.shared.updateHighlight(updatedHighlight, bookId: self.bookId) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        print("✅ Note added to highlight successfully")
+                        self.loadData()
+                    case .failure(let error):
+                        print("❌ Failed to add note: \(error)")
+                        let errorAlert = UIAlertController(title: "Error", message: "Failed to save note: \(error.localizedDescription)", preferredStyle: .alert)
+                        errorAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                        self.present(errorAlert, animated: true)
+                    }
+                }
+            }
         })
         
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))

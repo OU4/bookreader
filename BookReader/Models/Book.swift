@@ -7,7 +7,7 @@
 
 import UIKit
 
-struct Book {
+struct Book: Codable {
     enum BookType: String, Codable {
         case pdf, text, epub, image
     }
@@ -23,6 +23,42 @@ struct Book {
     var highlights: [Highlight] = []
     var notes: [Note] = []
     var readingStats: ReadingStats = ReadingStats()
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, author, filePath, type, lastReadPosition, bookmarks, highlights, notes, readingStats
+        // Exclude coverImage from Codable
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        author = try container.decode(String.self, forKey: .author)
+        filePath = try container.decodeIfPresent(String.self, forKey: .filePath) ?? ""
+        type = try container.decode(BookType.self, forKey: .type)
+        lastReadPosition = try container.decodeIfPresent(Float.self, forKey: .lastReadPosition) ?? 0.0
+        bookmarks = try container.decodeIfPresent([Bookmark].self, forKey: .bookmarks) ?? []
+        highlights = try container.decodeIfPresent([Highlight].self, forKey: .highlights) ?? []
+        notes = try container.decodeIfPresent([Note].self, forKey: .notes) ?? []
+        readingStats = try container.decodeIfPresent(ReadingStats.self, forKey: .readingStats) ?? ReadingStats()
+        // coverImage is set to nil since it's not stored in Codable
+        coverImage = nil
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(author, forKey: .author)
+        try container.encode(filePath, forKey: .filePath)
+        try container.encode(type, forKey: .type)
+        try container.encode(lastReadPosition, forKey: .lastReadPosition)
+        try container.encode(bookmarks, forKey: .bookmarks)
+        try container.encode(highlights, forKey: .highlights)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(readingStats, forKey: .readingStats)
+        // coverImage is not encoded since UIImage doesn't conform to Codable
+    }
     
     init(id: String = UUID().uuidString,
          title: String,
@@ -54,6 +90,36 @@ struct Bookmark: Codable {
     let position: Float
     let note: String?
     let dateCreated: Date
+    
+    enum CodingKeys: String, CodingKey {
+        case id, position, note, dateCreated
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        position = try container.decode(Float.self, forKey: .position)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        
+        // Handle date string conversion
+        if let dateString = try container.decodeIfPresent(String.self, forKey: .dateCreated) {
+            let formatter = ISO8601DateFormatter()
+            dateCreated = formatter.date(from: dateString) ?? Date()
+        } else {
+            dateCreated = Date()
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(position, forKey: .position)
+        try container.encodeIfPresent(note, forKey: .note)
+        
+        // Convert date to string
+        let formatter = ISO8601DateFormatter()
+        try container.encode(formatter.string(from: dateCreated), forKey: .dateCreated)
+    }
     
     init(id: String = UUID().uuidString,
          position: Float,
@@ -96,6 +162,40 @@ struct Highlight: Codable {
     let dateCreated: Date
     var note: String?
     
+    enum CodingKeys: String, CodingKey {
+        case id, text, color, position, dateCreated, note
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        text = try container.decode(String.self, forKey: .text)
+        color = try container.decode(HighlightColor.self, forKey: .color)
+        position = try container.decode(TextPosition.self, forKey: .position)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        
+        // Handle date string conversion
+        if let dateString = try container.decodeIfPresent(String.self, forKey: .dateCreated) {
+            let formatter = ISO8601DateFormatter()
+            dateCreated = formatter.date(from: dateString) ?? Date()
+        } else {
+            dateCreated = Date()
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encode(color, forKey: .color)
+        try container.encode(position, forKey: .position)
+        try container.encodeIfPresent(note, forKey: .note)
+        
+        // Convert date to string
+        let formatter = ISO8601DateFormatter()
+        try container.encode(formatter.string(from: dateCreated), forKey: .dateCreated)
+    }
+    
     init(id: String = UUID().uuidString,
          text: String,
          color: HighlightColor,
@@ -119,6 +219,49 @@ struct Note: Codable {
     let dateCreated: Date
     let dateModified: Date
     var tags: [String] = []
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, content, position, dateCreated, dateModified, tags
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        content = try container.decode(String.self, forKey: .content)
+        position = try container.decodeIfPresent(TextPosition.self, forKey: .position)
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        
+        let formatter = ISO8601DateFormatter()
+        
+        // Handle dateCreated string conversion
+        if let dateString = try container.decodeIfPresent(String.self, forKey: .dateCreated) {
+            dateCreated = formatter.date(from: dateString) ?? Date()
+        } else {
+            dateCreated = Date()
+        }
+        
+        // Handle dateModified string conversion
+        if let dateString = try container.decodeIfPresent(String.self, forKey: .dateModified) {
+            dateModified = formatter.date(from: dateString) ?? Date()
+        } else {
+            dateModified = Date()
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(content, forKey: .content)
+        try container.encodeIfPresent(position, forKey: .position)
+        try container.encode(tags, forKey: .tags)
+        
+        // Convert dates to strings
+        let formatter = ISO8601DateFormatter()
+        try container.encode(formatter.string(from: dateCreated), forKey: .dateCreated)
+        try container.encode(formatter.string(from: dateModified), forKey: .dateModified)
+    }
     
     init(id: String = UUID().uuidString,
          title: String,
@@ -160,6 +303,47 @@ struct ReadingStats: Codable {
     var longestStreak: Int = 0
     var wordsRead: Int = 0
     var pagesRead: Int = 0
+    
+    enum CodingKeys: String, CodingKey {
+        case totalReadingTime, sessionsCount, averageReadingSpeed, lastReadDate
+        case currentStreak, longestStreak, wordsRead, pagesRead
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        totalReadingTime = try container.decodeIfPresent(TimeInterval.self, forKey: .totalReadingTime) ?? 0
+        sessionsCount = try container.decodeIfPresent(Int.self, forKey: .sessionsCount) ?? 0
+        averageReadingSpeed = try container.decodeIfPresent(Double.self, forKey: .averageReadingSpeed) ?? 0
+        currentStreak = try container.decodeIfPresent(Int.self, forKey: .currentStreak) ?? 0
+        longestStreak = try container.decodeIfPresent(Int.self, forKey: .longestStreak) ?? 0
+        wordsRead = try container.decodeIfPresent(Int.self, forKey: .wordsRead) ?? 0
+        pagesRead = try container.decodeIfPresent(Int.self, forKey: .pagesRead) ?? 0
+        
+        // Handle date string conversion
+        if let dateString = try container.decodeIfPresent(String.self, forKey: .lastReadDate) {
+            let formatter = ISO8601DateFormatter()
+            lastReadDate = formatter.date(from: dateString)
+        } else {
+            lastReadDate = nil
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(totalReadingTime, forKey: .totalReadingTime)
+        try container.encode(sessionsCount, forKey: .sessionsCount)
+        try container.encode(averageReadingSpeed, forKey: .averageReadingSpeed)
+        try container.encode(currentStreak, forKey: .currentStreak)
+        try container.encode(longestStreak, forKey: .longestStreak)
+        try container.encode(wordsRead, forKey: .wordsRead)
+        try container.encode(pagesRead, forKey: .pagesRead)
+        
+        // Convert date to string
+        if let lastReadDate = lastReadDate {
+            let formatter = ISO8601DateFormatter()
+            try container.encode(formatter.string(from: lastReadDate), forKey: .lastReadDate)
+        }
+    }
     
     init(totalReadingTime: TimeInterval = 0,
          sessionsCount: Int = 0,

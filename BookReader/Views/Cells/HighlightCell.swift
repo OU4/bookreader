@@ -19,17 +19,22 @@ class HighlightCell: UITableViewCell {
     
     private let highlightTextLabel: UILabel = {
         let label = UILabel()
-        label.font = UIFont.systemFont(ofSize: 16)
+        label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
         label.numberOfLines = 0
+        label.textColor = .label
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
     
     private let noteLabel: UILabel = {
         let label = UILabel()
-        label.font = UIFont.systemFont(ofSize: 14)
-        label.textColor = .secondaryLabel
+        label.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+        label.textColor = .systemBlue
         label.numberOfLines = 0
+        label.backgroundColor = UIColor.systemGray6.withAlphaComponent(0.5)
+        label.layer.cornerRadius = 8
+        label.layer.masksToBounds = true
+        label.textAlignment = .left
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
@@ -69,9 +74,9 @@ class HighlightCell: UITableViewCell {
             highlightTextLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             highlightTextLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
             
-            noteLabel.leadingAnchor.constraint(equalTo: highlightTextLabel.leadingAnchor),
-            noteLabel.trailingAnchor.constraint(equalTo: highlightTextLabel.trailingAnchor),
-            noteLabel.topAnchor.constraint(equalTo: highlightTextLabel.bottomAnchor, constant: 8),
+            noteLabel.leadingAnchor.constraint(equalTo: highlightTextLabel.leadingAnchor, constant: 8),
+            noteLabel.trailingAnchor.constraint(equalTo: highlightTextLabel.trailingAnchor, constant: -8),
+            noteLabel.topAnchor.constraint(equalTo: highlightTextLabel.bottomAnchor, constant: 12),
             
             dateLabel.leadingAnchor.constraint(equalTo: highlightTextLabel.leadingAnchor),
             dateLabel.trailingAnchor.constraint(equalTo: highlightTextLabel.trailingAnchor),
@@ -86,12 +91,18 @@ class HighlightCell: UITableViewCell {
         highlightTextLabel.text = "\"\(highlight.text)\""
         
         if let note = highlight.note, !note.isEmpty {
-            noteLabel.text = "Note: \(note)"
+            // Create styled note text
+            let noteText = "📝 \(note)"
+            noteLabel.text = "  \(noteText)  " // Add padding
             noteLabel.isHidden = false
         } else {
             noteLabel.isHidden = true
         }
         
-        dateLabel.text = DateFormatter.readable.string(from: highlight.dateCreated)
+        // Format date more clearly
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        dateLabel.text = "Created: \(formatter.string(from: highlight.dateCreated))"
     }
 }

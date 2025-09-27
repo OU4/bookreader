@@ -14,6 +14,7 @@ class TextToSpeechService: NSObject {
     private let synthesizer = AVSpeechSynthesizer()
     private var currentText: String = ""
     private var currentPosition: Int = 0
+    private var currentLength: Int = 0
     private var isPlaying: Bool = false
     private var isPaused: Bool = false
     
@@ -31,7 +32,6 @@ class TextToSpeechService: NSObject {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            print("Failed to setup audio session: \(error)")
         }
     }
     
@@ -41,7 +41,8 @@ class TextToSpeechService: NSObject {
         
         currentText = text
         currentPosition = position
-        
+        currentLength = text.count
+
         let textToSpeak = String(text.dropFirst(position))
         let utterance = AVSpeechUtterance(string: textToSpeak)
         
@@ -81,6 +82,7 @@ class TextToSpeechService: NSObject {
         isPlaying = false
         isPaused = false
         currentPosition = 0
+        currentLength = 0
         
         delegate?.speechDidStop()
     }
@@ -147,8 +149,8 @@ class TextToSpeechService: NSObject {
     }
     
     var progress: Float {
-        guard !currentText.isEmpty else { return 0 }
-        return Float(currentPosition) / Float(currentText.count)
+        guard currentLength > 0 else { return 0 }
+        return Float(currentPosition) / Float(currentLength)
     }
 }
 
@@ -180,7 +182,7 @@ extension TextToSpeechService: AVSpeechSynthesizerDelegate {
     }
     
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
-        currentPosition += characterRange.location
+        currentPosition = characterRange.location
         delegate?.speechDidUpdatePosition(currentPosition)
     }
 }

@@ -10,36 +10,31 @@ import UIKit
 class LibraryStatsView: UIView {
     
     // MARK: - UI Components
-    private lazy var blurView: UIVisualEffectView = {
-        let effect = UIBlurEffect(style: .systemUltraThinMaterial)
-        let view = UIVisualEffectView(effect: effect)
+    private lazy var backgroundView: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor.systemBackground
         view.layer.cornerRadius = 16
-        view.layer.masksToBounds = true
+        view.layer.shadowColor = UIColor.black.cgColor
+        view.layer.shadowOffset = CGSize(width: 0, height: 2)
+        view.layer.shadowRadius = 12
+        view.layer.shadowOpacity = 0.06
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
     
-    private let stackView: UIStackView = {
+    private let statsStackView: UIStackView = {
         let stackView = UIStackView()
         stackView.axis = .horizontal
         stackView.distribution = .fillEqually
         stackView.alignment = .center
-        stackView.spacing = 1
+        stackView.spacing = 0
         stackView.translatesAutoresizingMaskIntoConstraints = false
         return stackView
     }()
     
-    private let totalBooksView = ModernStatItemView()
-    private let booksReadView = ModernStatItemView()
-    private let readingTimeView = ModernStatItemView()
-    
-    private let chevronView: UIImageView = {
-        let imageView = UIImageView(image: UIImage(systemName: "chevron.right"))
-        imageView.tintColor = .secondaryLabel
-        imageView.contentMode = .scaleAspectFit
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        return imageView
-    }()
+    private let totalBooksView = SimpleStatView()
+    private let completedBooksView = SimpleStatView()
+    private let readingTimeView = SimpleStatView()
     
     // MARK: - Initialization
     override init(frame: CGRect) {
@@ -56,51 +51,38 @@ class LibraryStatsView: UIView {
     private func setupUI() {
         backgroundColor = .clear
         
-        addSubview(blurView)
-        blurView.contentView.addSubview(stackView)
-        blurView.contentView.addSubview(chevronView)
+        addSubview(backgroundView)
+        backgroundView.addSubview(statsStackView)
         
-        stackView.addArrangedSubview(totalBooksView)
-        stackView.addArrangedSubview(booksReadView)
-        stackView.addArrangedSubview(readingTimeView)
+        statsStackView.addArrangedSubview(totalBooksView)
+        statsStackView.addArrangedSubview(completedBooksView)
+        statsStackView.addArrangedSubview(readingTimeView)
         
         NSLayoutConstraint.activate([
-            blurView.topAnchor.constraint(equalTo: topAnchor),
-            blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            blurView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            blurView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            backgroundView.topAnchor.constraint(equalTo: topAnchor),
+            backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
             
-            stackView.topAnchor.constraint(equalTo: blurView.contentView.topAnchor, constant: 20),
-            stackView.leadingAnchor.constraint(equalTo: blurView.contentView.leadingAnchor, constant: 16),
-            stackView.trailingAnchor.constraint(equalTo: chevronView.leadingAnchor, constant: -16),
-            stackView.bottomAnchor.constraint(equalTo: blurView.contentView.bottomAnchor, constant: -20),
-            
-            chevronView.trailingAnchor.constraint(equalTo: blurView.contentView.trailingAnchor, constant: -16),
-            chevronView.centerYAnchor.constraint(equalTo: blurView.contentView.centerYAnchor),
-            chevronView.widthAnchor.constraint(equalToConstant: 12),
-            chevronView.heightAnchor.constraint(equalToConstant: 12)
+            statsStackView.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 20),
+            statsStackView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 16),
+            statsStackView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -16),
+            statsStackView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -20)
         ])
-        
-        // Add shadow
-        layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOffset = CGSize(width: 0, height: 2)
-        layer.shadowRadius = 12
-        layer.shadowOpacity = 0.1
     }
     
     // MARK: - Configuration
-    func updateStats(totalBooks: Int, readingTime: Int, completedBooks: Int) {
+    func updateStats(totalBooks: Int, readingTime: Int, completedBooks: Int, currentStreak: Int = 0) {
+        // Configure simple stat views
         totalBooksView.configure(
-            icon: "📚",
             value: "\(totalBooks)",
             title: "Total Books",
             color: .systemBlue
         )
         
-        booksReadView.configure(
-            icon: "✅",
+        completedBooksView.configure(
             value: "\(completedBooks)",
-            title: "Completed",
+            title: "Finished",
             color: .systemGreen
         )
         
@@ -114,10 +96,9 @@ class LibraryStatsView: UIView {
         }
         
         readingTimeView.configure(
-            icon: "⏱️",
             value: timeString,
-            title: "Reading Time",
-            color: .systemOrange
+            title: "Time Read",
+            color: .systemPurple
         )
         
         // Add entrance animation
@@ -125,32 +106,40 @@ class LibraryStatsView: UIView {
     }
     
     private func addEntranceAnimation() {
-        alpha = 0
-        transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        backgroundView.alpha = 0
+        backgroundView.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
         
+        // Animate background
         UIView.animate(withDuration: 0.6, delay: 0.1, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-            self.alpha = 1
-            self.transform = .identity
+            self.backgroundView.alpha = 1
+            self.backgroundView.transform = .identity
+        }
+        
+        // Animate stat views with stagger
+        let statViews = [totalBooksView, completedBooksView, readingTimeView]
+        for (index, statView) in statViews.enumerated() {
+            statView.alpha = 0
+            statView.transform = CGAffineTransform(translationX: 0, y: 15)
+            
+            UIView.animate(withDuration: 0.5, delay: 0.2 + Double(index) * 0.1, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+                statView.alpha = 1
+                statView.transform = .identity
+            }
         }
     }
 }
 
-// MARK: - Modern Stat Item View
-class ModernStatItemView: UIView {
-    
-    private let iconLabel: UILabel = {
-        let label = UILabel()
-        label.font = UIFont.systemFont(ofSize: 24)
-        label.textAlignment = .center
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }()
+// MARK: - Simple Stat View
+class SimpleStatView: UIView {
     
     private let valueLabel: UILabel = {
         let label = UILabel()
-        label.font = UIFont.boldSystemFont(ofSize: 20)
+        label.font = UIFont.systemFont(ofSize: 24, weight: .bold)
         label.textColor = .label
         label.textAlignment = .center
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.7
+        label.numberOfLines = 1
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
@@ -160,19 +149,19 @@ class ModernStatItemView: UIView {
         label.font = UIFont.systemFont(ofSize: 12, weight: .medium)
         label.textColor = .secondaryLabel
         label.textAlignment = .center
-        label.numberOfLines = 2
+        label.numberOfLines = 1
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.8
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
     
-    private let separatorView: UIView = {
+    private let colorIndicator: UIView = {
         let view = UIView()
-        view.backgroundColor = UIColor.separator.withAlphaComponent(0.3)
+        view.layer.cornerRadius = 3
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
-    
-    private var accentColor: UIColor = .systemBlue
     
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -187,73 +176,30 @@ class ModernStatItemView: UIView {
     private func setupUI() {
         backgroundColor = .clear
         
-        addSubview(iconLabel)
+        addSubview(colorIndicator)
         addSubview(valueLabel)
         addSubview(titleLabel)
-        addSubview(separatorView)
         
         NSLayoutConstraint.activate([
-            iconLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            iconLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            colorIndicator.topAnchor.constraint(equalTo: topAnchor),
+            colorIndicator.centerXAnchor.constraint(equalTo: centerXAnchor),
+            colorIndicator.widthAnchor.constraint(equalToConstant: 28),
+            colorIndicator.heightAnchor.constraint(equalToConstant: 4),
             
-            valueLabel.topAnchor.constraint(equalTo: iconLabel.bottomAnchor, constant: 8),
-            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            valueLabel.topAnchor.constraint(equalTo: colorIndicator.bottomAnchor, constant: 12),
+            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             
-            titleLabel.topAnchor.constraint(equalTo: valueLabel.bottomAnchor, constant: 4),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            titleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            
-            separatorView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            separatorView.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            separatorView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            separatorView.widthAnchor.constraint(equalToConstant: 1)
+            titleLabel.topAnchor.constraint(equalTo: valueLabel.bottomAnchor, constant: 6),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            titleLabel.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }
     
-    func configure(icon: String, value: String, title: String, color: UIColor) {
-        iconLabel.text = icon
+    func configure(value: String, title: String, color: UIColor) {
         valueLabel.text = value
         titleLabel.text = title
-        accentColor = color
-        
-        // Add color accent to value
-        valueLabel.textColor = color
-        
-        // Hide separator for last item
-        separatorView.isHidden = false
-        
-        // Add entrance animation
-        addEntranceAnimation()
-    }
-    
-    private func addEntranceAnimation() {
-        iconLabel.alpha = 0
-        valueLabel.alpha = 0
-        titleLabel.alpha = 0
-        
-        iconLabel.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
-        valueLabel.transform = CGAffineTransform(translationX: 0, y: 10)
-        titleLabel.transform = CGAffineTransform(translationX: 0, y: 10)
-        
-        UIView.animate(withDuration: 0.5, delay: 0.2, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-            self.iconLabel.alpha = 1
-            self.iconLabel.transform = .identity
-        }
-        
-        UIView.animate(withDuration: 0.4, delay: 0.3, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-            self.valueLabel.alpha = 1
-            self.valueLabel.transform = .identity
-        }
-        
-        UIView.animate(withDuration: 0.4, delay: 0.4, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-            self.titleLabel.alpha = 1
-            self.titleLabel.transform = .identity
-        }
-    }
-    
-    func hideSeparator() {
-        separatorView.isHidden = true
+        colorIndicator.backgroundColor = color
     }
 }

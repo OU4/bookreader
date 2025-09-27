@@ -107,7 +107,6 @@ class LiveTextSelectionView: UIView {
             do {
                 try handler.perform([request])
             } catch {
-                print("Text recognition failed: \(error)")
             }
         }
     }
@@ -131,7 +130,6 @@ class LiveTextSelectionView: UIView {
             }
         }
         
-        print("✅ LiveText attached to PDF view")
     }
     
     func enableTextSelection(for pdfPage: PDFPage, in rect: CGRect) {
@@ -176,7 +174,6 @@ class LiveTextSelectionView: UIView {
             recognizedTextElements.append(textElement)
         }
         
-        print("✅ Recognized \(recognizedTextElements.count) text elements")
     }
     
     private func convertVisionRect(_ visionRect: CGRect) -> CGRect {

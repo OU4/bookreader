@@ -22,10 +22,15 @@ class ModernBookReaderViewController: UIViewController {
     private var sessionStartTime: Date?
     private var sessionTimer: Timer?
     private var currentSessionDuration: TimeInterval = 0
-    
+    private var accumulatedSessionDuration: TimeInterval = 0
+    private var lastKnownProgress: Float = 0
+    private var lastKnownPage: Int?
+    private var lastKnownTotalPages: Int?
+
     // Position tracking
     private var lastSavedPosition: Float = 0
     private var positionSaveTimer: Timer?
+    private var isObservingAppLifecycle = false
     
     // MARK: - PDF Highlight Handler
     private var pdfHighlightHandler: PDFHighlightHandler?
@@ -90,21 +95,27 @@ class ModernBookReaderViewController: UIViewController {
     
     // Reading timer widget
     private var readingTimerWidget: ReadingTimerWidget?
+    private let readingStatusHUD = ReadingStatusHUD()
     
     // Bookmark components
-    private lazy var quickBookmarkButton: QuickBookmarkButton = {
-        let button = QuickBookmarkButton()
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.addTarget(self, action: #selector(quickBookmarkTapped), for: .touchUpInside)
-        return button
-    }()
-    
     private var bookmarkSidebar: BookmarkSidebarView?
-    
+
     private var addBookmarkView: AddBookmarkView?
     
     private var searchView: BookSearchView?
-    
+    private let searchNavigator = SearchNavigatorView()
+    private var searchSelections: [PDFSelection] = []
+    private var searchResultIndex: Int = 0
+    private var lastSearchQuery: String = ""
+    private let notesPeekView = NotesPeekView()
+    private let ttsControllerView = TTSMiniControllerView()
+    private var totalTextLength: Int {
+        if !extractedText.isEmpty {
+            return extractedText.count
+        }
+        return textView.text.count
+    }
+
     // Live Text support
     @available(iOS 16.0, *)
     private lazy var imageAnalyzer = ImageAnalyzer()
@@ -123,6 +134,18 @@ class ModernBookReaderViewController: UIViewController {
         loadTheme()
         setupLiveText()
         showWelcomeAnimation()
+        
+        // Ensure clean state
+        stopAllTimers()
+        TextToSpeechService.shared.delegate = self
+        NotificationCenter.default.addObserver(self, selector: #selector(handleFirebaseBooksUpdated), name: NSNotification.Name("FirebaseBooksUpdated"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .highlightAdded, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .highlightRemoved, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .highlightUpdated, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .noteAdded, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .noteRemoved, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .noteUpdated, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleNotesOrHighlightsChanged(_:)), name: .bookNotesUpdated, object: nil)
     }
     
     override func viewDidLayoutSubviews() {
@@ -132,7 +155,8 @@ class ModernBookReaderViewController: UIViewController {
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // Don't start session here - wait for content to load
+        // Refresh toolbar state; session starts after content is ready
+        updateToolbarButtonStates()
     }
     
     override func viewDidAppear(_ animated: Bool) {
@@ -150,16 +174,23 @@ class ModernBookReaderViewController: UIViewController {
     
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Save position and end reading session
-        saveCurrentPosition()
+        
+        // Save position immediately before disappearing
+        saveCurrentPositionImmediately()
+        
+        // End reading session to clean up timers
         endReadingSession()
+        
+        // Clean up PDF memory when leaving the view
+        cleanupPDFMemory()
     }
     
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        // Make sure session is ended
-        if sessionTimer != nil {
-            endReadingSession()
+        
+        // Ensure all timers are stopped when view disappears
+        DispatchQueue.main.async { [weak self] in
+            self?.stopAllTimers()
         }
     }
     
@@ -171,29 +202,46 @@ class ModernBookReaderViewController: UIViewController {
         return .slide
     }
     
+    // MARK: - Memory Management
+    private func cleanupPDFMemory() {
+        // Clear PDF document to free memory
+        pdfView?.document = nil
+        
+        // Clear PDF cache
+        optimizedPDFManager?.clearCache()
+        
+        // Clear Live Text analysis to free memory
+        if #available(iOS 16.0, *) {
+            imageInteraction?.analysis = nil
+        }
+        
+        // Force memory cleanup
+        autoreleasepool {
+            // This helps release any retained PDF objects
+        }
+    }
+    
     // MARK: - Cleanup
     deinit {
+        // Synchronous cleanup to prevent crashes during deallocation
+        stopAllTimersSync()
+        
         // Clean up reading timer widget
-        hideReadingTimerWidget()
+        readingTimerWidget?.endSession()
+        readingTimerWidget?.removeFromSuperview()
+        readingTimerWidget = nil
         
-        // Clean up timers in proper order to prevent memory leaks
-        if let timer = sessionTimer {
-            timer.invalidate()
-            sessionTimer = nil
-        }
+        // Clean up PDF resources
+        cleanupPDFMemory()
+        optimizedPDFManager = nil
+        pdfView = nil
         
-        if let timer = positionSaveTimer {
-            timer.invalidate()
-            positionSaveTimer = nil
-        }
-        
-        // Clean up any animation timers
+        // Stop all animations to prevent timer leaks
         view.layer.removeAllAnimations()
         
-        // Remove notification observers
+        // Remove all notification observers
         NotificationCenter.default.removeObserver(self)
-        
-        print("🗑️ ModernBookReaderViewController deinitialized")
+        TextToSpeechService.shared.delegate = nil
     }
     
     // MARK: - Modern UI Setup
@@ -209,7 +257,17 @@ class ModernBookReaderViewController: UIViewController {
         view.addSubview(navigationHeader)
         view.addSubview(floatingToolbar)
         view.addSubview(settingsPanel)
-        view.addSubview(quickBookmarkButton)
+        readingStatusHUD.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(readingStatusHUD)
+        searchNavigator.translatesAutoresizingMaskIntoConstraints = false
+        searchNavigator.delegate = self
+        searchNavigator.isHidden = true
+        view.addSubview(searchNavigator)
+        notesPeekView.delegate = self
+        view.addSubview(notesPeekView)
+        ttsControllerView.delegate = self
+        ttsControllerView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(ttsControllerView)
         
         // Setup constraints
         setupConstraints()
@@ -266,11 +324,18 @@ class ModernBookReaderViewController: UIViewController {
             settingsPanel.widthAnchor.constraint(equalToConstant: 280),
             settingsPanel.heightAnchor.constraint(equalToConstant: 400),
             
-            // Quick bookmark button
-            quickBookmarkButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            quickBookmarkButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            quickBookmarkButton.widthAnchor.constraint(equalToConstant: 40),
-            quickBookmarkButton.heightAnchor.constraint(equalToConstant: 40)
+            readingStatusHUD.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            readingStatusHUD.bottomAnchor.constraint(equalTo: readingProgressView.topAnchor, constant: -12),
+            
+            searchNavigator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            searchNavigator.topAnchor.constraint(equalTo: navigationHeader.bottomAnchor, constant: 16),
+
+            notesPeekView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            notesPeekView.bottomAnchor.constraint(equalTo: readingProgressView.topAnchor, constant: -16),
+
+            ttsControllerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            ttsControllerView.bottomAnchor.constraint(equalTo: floatingToolbar.topAnchor, constant: -80),
+            ttsControllerView.widthAnchor.constraint(equalToConstant: 220)
         ])
     }
     
@@ -368,11 +433,9 @@ class ModernBookReaderViewController: UIViewController {
         
         // Check if Live Text is supported
         guard ImageAnalyzer.isSupported else {
-            print("❌ Live Text is not supported on this device")
             return
         }
         
-        print("📝 Setting up Live Text support...")
         
         // Enable enhanced text interaction for PDFs
         if let pdfView = pdfView {
@@ -404,30 +467,55 @@ class ModernBookReaderViewController: UIViewController {
         guard let pdfView = notification.object as? PDFView,
               let currentPage = pdfView.currentPage else { return }
         
-        Task {
-            await analyzePDFPage(currentPage)
+        // Update reading progress and position
+        updateReadingProgress()
+        saveCurrentPosition()
+        
+        // Perform Live Text analysis only for small documents or when explicitly needed
+        if #available(iOS 16.0, *), !isLargeDocument {
+            Task {
+                await analyzePDFPageOptimized(currentPage)
+            }
+        }
+        
+        // Preload nearby pages for smooth scrolling
+        if let document = pdfView.document {
+            let currentPageIndex = document.index(for: currentPage)
+            optimizedPDFManager?.preloadPages(around: currentPageIndex, radius: 2)
         }
     }
     
     @available(iOS 16.0, *)
-    private func analyzePDFPage(_ page: PDFPage) async {
+    private func analyzePDFPageOptimized(_ page: PDFPage) async {
+        // Use much smaller thumbnail for analysis to reduce memory usage
+        let maxSize = CGSize(width: 400, height: 500) // Further reduced for memory optimization
         let pageSize = page.bounds(for: .mediaBox).size
-        let image = page.thumbnail(of: pageSize, for: .mediaBox)
+        let scaleFactor = min(maxSize.width / pageSize.width, maxSize.height / pageSize.height, 1.0)
+        let thumbnailSize = CGSize(width: pageSize.width * scaleFactor, height: pageSize.height * scaleFactor)
+        
+        // Create thumbnail in autoreleasepool to manage memory
+        let image = autoreleasepool {
+            return page.thumbnail(of: thumbnailSize, for: .mediaBox)
+        }
         
         do {
-            let configuration = ImageAnalyzer.Configuration([.text, .machineReadableCode])
+            // Use text-only analysis for better performance and memory
+            let configuration = ImageAnalyzer.Configuration([.text])
             let analysis = try await imageAnalyzer.analyze(image, configuration: configuration)
             
             await MainActor.run {
                 if let interaction = self.imageInteraction {
+                    // Clear previous analysis to free memory
+                    interaction.analysis = nil
                     interaction.analysis = analysis
                     interaction.isSupplementaryInterfaceHidden = true
-                    
-                    print("✅ Live Text enabled for page with \(analysis.transcript.count) characters")
                 }
             }
         } catch {
-            print("❌ Live Text analysis failed: \(error)")
+            // Failed analysis - clear any existing analysis to free memory
+            await MainActor.run {
+                self.imageInteraction?.analysis = nil
+            }
         }
     }
     
@@ -438,11 +526,16 @@ class ModernBookReaderViewController: UIViewController {
         let targetConstantToolbar: CGFloat = isToolbarVisible ? -16 : 100
         let targetConstantHeader: CGFloat = isToolbarVisible ? 0 : -80
         let targetAlphaProgress: CGFloat = isToolbarVisible ? 1 : 0
+        let shouldKeepTTSVisible = TextToSpeechService.shared.speaking || TextToSpeechService.shared.paused
+        let ttsAlpha: CGFloat = shouldKeepTTSVisible ? 1 : targetAlphaProgress
         
         UIView.animate(withDuration: 0.6, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.5) {
             self.toolbarBottomConstraint?.constant = targetConstantToolbar
             self.headerTopConstraint?.constant = targetConstantHeader
             self.readingProgressView.alpha = targetAlphaProgress
+            self.searchNavigator.alpha = targetAlphaProgress
+            self.notesPeekView.alpha = targetAlphaProgress
+            self.ttsControllerView.alpha = ttsAlpha
             self.view.layoutIfNeeded()
         }
         
@@ -453,27 +546,36 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     // MARK: - Bookmark Actions
-    @objc private func quickBookmarkTapped() {
+    private func addQuickBookmark(showFeedback: Bool = true) {
         guard let book = currentBook else { return }
-        
-        // Add quick bookmark
-        UnifiedReadingTracker.shared.addQuickBookmark(
-            for: book.id,
-            bookTitle: book.title,
-            pdfView: pdfView,
-            textView: textView
-        )
-        
-        // Update bookmark button state
-        quickBookmarkButton.setBookmarked(true, animated: true)
-        
-        // Reset bookmark state after animation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.quickBookmarkButton.setBookmarked(false, animated: true)
+
+        let createdBookmark: BookmarkItem?
+        if let pdfView = pdfView, !pdfView.isHidden {
+            createdBookmark = BookmarkManager.shared.addBookmarkFromPDF(
+                bookId: book.id,
+                bookTitle: book.title,
+                pdfView: pdfView,
+                title: "Quick Bookmark"
+            )
+        } else {
+            createdBookmark = BookmarkManager.shared.addBookmarkFromText(
+                bookId: book.id,
+                bookTitle: book.title,
+                textView: textView,
+                title: "Quick Bookmark"
+            )
         }
-        
-        // Show brief confirmation
-        showBookmarkConfirmation()
+
+        guard createdBookmark != nil else {
+            showQuickHint("Couldn't save bookmark")
+            return
+        }
+
+        if showFeedback {
+            showBookmarkConfirmation()
+        }
+
+        updateToolbarButtonStates()
     }
     
     private func showBookmarkConfirmation() {
@@ -650,13 +752,21 @@ class ModernBookReaderViewController: UIViewController {
         var currentIndex = 0
         let characters = Array(fullText)
         
-        // Ensure timer runs on main thread for UI updates
+        // Create a weak reference to prevent retain cycles
         let timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] timer in
+            // Ensure we're on main thread and self still exists
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
             DispatchQueue.main.async {
-                guard let self = self else {
+                // Double-check self still exists after async dispatch
+                guard self.textView != nil else {
                     timer.invalidate()
                     return
                 }
+                
                 if currentIndex < characters.count {
                     self.textView.text += String(characters[currentIndex])
                     currentIndex += 1
@@ -665,7 +775,14 @@ class ModernBookReaderViewController: UIViewController {
                 }
             }
         }
+        
+        // Store timer reference for potential cleanup
         RunLoop.main.add(timer, forMode: .common)
+        
+        // Auto-cleanup after maximum duration to prevent indefinite running
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+            timer.invalidate()
+        }
     }
     
     private func showModernTextMenu(for text: String, at location: CGPoint) {
@@ -709,29 +826,57 @@ class ModernBookReaderViewController: UIViewController {
     
     // MARK: - Book Loading
     func loadBook(_ book: Book) {
-        currentBook = book
+        let resolvedBook = mergeWithLocalNotesIfNeeded(book)
+        currentBook = resolvedBook
         navigationHeader.setBookTitle(book.title, author: book.author)
-        
+
+        stopAllTimers()
+        accumulatedSessionDuration = 0
+        currentSessionDuration = 0
+        sessionStartTime = nil
+
+        updateToolbarButtonStates()
+        clearSearchResults()
+        notesPeekView.update(highlights: 0, notes: 0)
+
         // Start reading session tracking
-        UnifiedReadingTracker.shared.startSession(for: book)
-        
+        UnifiedReadingTracker.shared.startSession(for: resolvedBook)
+
         // Load book content with beautiful animation
-        loadBookContent(book)
+        loadBookContent(resolvedBook)
         
         // Position restoration now happens inside loadPDFContent when PDF is fully loaded
     }
+
+    private func mergeWithLocalNotesIfNeeded(_ book: Book) -> Book {
+        let localBooks = BookStorage.shared.loadBooks()
+        guard let localBook = localBooks.first(where: { $0.id == book.id }) else {
+            return book
+        }
+
+        let localTimestamp = localBook.notesUpdatedAt ?? Date.distantPast
+        let remoteTimestamp = book.notesUpdatedAt ?? Date.distantPast
+
+        guard localTimestamp >= remoteTimestamp else {
+            return book
+        }
+
+        var merged = book
+        merged.personalSummary = localBook.personalSummary
+        merged.keyTakeaways = localBook.keyTakeaways
+        merged.actionItems = localBook.actionItems
+        merged.sessionNotes = localBook.sessionNotes
+        merged.notesUpdatedAt = localBook.notesUpdatedAt
+        return merged
+    }
     
     private func loadBookContent(_ book: Book) {
-        print("📖 Selected book: \(book.title)")
-        print("📂 File path: \(book.filePath)")
-        print("📄 File exists: \(FileManager.default.fileExists(atPath: book.filePath))")
         
         // Show loading animation
         showLoadingAnimation()
         
         // Check if filePath is empty
         if book.filePath.isEmpty {
-            print("❌ Book has empty filePath - offering to re-upload")
             hideLoadingAnimation()
             showBookReuploadOption(for: book)
             return
@@ -739,16 +884,13 @@ class ModernBookReaderViewController: UIViewController {
         
         // Check if this is a Firebase URL that needs to be downloaded
         if book.filePath.starts(with: "https://") {
-            print("🔄 Downloading book from Firebase...")
             UnifiedFirebaseStorage.shared.downloadBook(book) { [weak self] result in
                 DispatchQueue.main.async {
                     switch result {
                     case .success(let localURL):
-                        print("✅ Book downloaded to: \(localURL.path)")
                         // Load content from local file
                         self?.loadContentFromLocalFile(book, localPath: localURL.path)
                     case .failure(let error):
-                        print("❌ Failed to download book: \(error)")
                         self?.hideLoadingAnimation()
                         self?.showErrorMessage("Failed to download book: \(error.localizedDescription)")
                     }
@@ -794,7 +936,6 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     private func loadTextContent(from path: String) {
-        print("📄 Loading text content from: \(path)")
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -818,7 +959,6 @@ class ModernBookReaderViewController: UIViewController {
                         self.restoreLastPosition()
                     }
                     
-                    print("✅ Text content loaded successfully")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -830,11 +970,9 @@ class ModernBookReaderViewController: UIViewController {
     }
     
     private func loadPDFContent(from path: String) {
-        print("📄 Loading PDF from: \(path)")
         
         // Check if file exists
         guard FileManager.default.fileExists(atPath: path) else {
-            print("❌ PDF file not found at path: \(path)")
             showErrorMessage("File not found: \(path)")
             return
         }
@@ -846,17 +984,25 @@ class ModernBookReaderViewController: UIViewController {
         DispatchQueue.global(qos: .userInitiated).async {
             let url = URL(fileURLWithPath: path)
             
+            // Check file size for optimization strategy
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            let isLarge = fileSize > 10 * 1024 * 1024 // 10MB threshold
+            
+            DispatchQueue.main.async {
+                self.isLargeDocument = isLarge
+                if isLarge {
+                }
+            }
+            
             // Try to load PDF document
             guard let pdfDocument = PDFDocument(url: url) else {
                 DispatchQueue.main.async {
-                    print("❌ Failed to load PDF document")
                     self.showErrorMessage("Failed to load PDF document. The file may be corrupted or not a valid PDF.")
                     self.hideLoadingAnimation()
                 }
                 return
             }
             
-            print("✅ PDF document loaded with \(pdfDocument.pageCount) pages")
             
             // Configure PDF on main thread
             DispatchQueue.main.async {
@@ -867,6 +1013,11 @@ class ModernBookReaderViewController: UIViewController {
                 // Create PDF view if it doesn't exist
                 if self.pdfView == nil {
                     self.setupPDFView()
+                    
+                    // Initialize optimized PDF manager
+                    if let pdfView = self.pdfView {
+                        self.optimizedPDFManager = OptimizedPDFManager(pdfView: pdfView)
+                    }
                 }
                 
                 // Configure PDF view step by step to avoid scale issues
@@ -876,14 +1027,31 @@ class ModernBookReaderViewController: UIViewController {
                 // Set document first
                 self.pdfView?.document = pdfDocument
                 
-                // Configure display settings for better navigation
-                self.pdfView?.displayMode = .singlePageContinuous
-                self.pdfView?.displayDirection = .vertical
-                
-                // Wait for view to layout properly, then configure scaling
-                DispatchQueue.main.async {
-                    self.configurePDFScalingSafely()
+                // Use optimized configuration based on document size
+                if self.isLargeDocument {
+                    // Optimized settings for large documents
+                    self.pdfView?.displayMode = .singlePageContinuous // Allow scrolling
+                    self.pdfView?.interpolationQuality = .low // Better performance
+                    self.pdfView?.autoScales = true
+                    // Disable page shadows and reduce page break margins for memory
+                    self.pdfView?.pageShadowsEnabled = false
+                    self.pdfView?.pageBreakMargins = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+                } else {
+                    // Memory-optimized settings for smaller documents
+                    self.pdfView?.displayMode = .singlePageContinuous // Allow scrolling
+                    self.pdfView?.interpolationQuality = .low // Better quality for smaller files
+                    self.pdfView?.autoScales = true
+                    // Enable some visual features for smaller documents
+                    self.pdfView?.pageShadowsEnabled = true
+                    self.pdfView?.pageBreakMargins = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
+                    
+                    // Configure scaling with reduced overhead
+                    DispatchQueue.main.async {
+                        self.configurePDFScalingOptimized()
+                    }
                 }
+                
+                self.pdfView?.displayDirection = .vertical
                 
                 // Go to first page
                 if let firstPage = pdfDocument.page(at: 0) {
@@ -907,12 +1075,16 @@ class ModernBookReaderViewController: UIViewController {
                     self.restoreLastPosition()
                 }
                 
-                print("✅ PDF view configured and displayed successfully")
+                // Start reading session after PDF is ready
+                self.startReadingSession()
+                
             }
         }
     }
     
     private var pdfView: PDFView?
+    private var optimizedPDFManager: OptimizedPDFManager?
+    private var isLargeDocument = false
     
     // Live text selection overlay
     private lazy var liveTextSelectionView: LiveTextSelectionView = {
@@ -927,18 +1099,23 @@ class ModernBookReaderViewController: UIViewController {
         pdfV.translatesAutoresizingMaskIntoConstraints = false
         pdfV.backgroundColor = .systemBackground
         
-        // Safe initial configuration for proper PDF navigation
-        pdfV.displayMode = .singlePageContinuous
+        // Optimized initial configuration
+        pdfV.displayMode = .singlePageContinuous // Always allow scrolling
         pdfV.displayDirection = .vertical
-        pdfV.autoScales = false // Start with manual scaling
-        pdfV.interpolationQuality = .low // Use low for better performance
+        pdfV.autoScales = true // Enable auto scaling
+        pdfV.interpolationQuality = .low // Balanced quality
         
         // Enable text selection and interaction
         pdfV.isUserInteractionEnabled = true
         
-        // Enable page navigation
-        pdfV.pageShadowsEnabled = true
-        pdfV.pageBreakMargins = UIEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
+        // Optimize page shadows and margins based on document size
+        if isLargeDocument {
+            pdfV.pageShadowsEnabled = false // Disable shadows for better performance
+            pdfV.pageBreakMargins = UIEdgeInsets.zero
+        } else {
+            pdfV.pageShadowsEnabled = true
+            pdfV.pageBreakMargins = UIEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
+        }
         
         // Insert behind other UI elements but above background
         view.insertSubview(pdfV, belowSubview: navigationHeader)
@@ -966,7 +1143,6 @@ class ModernBookReaderViewController: UIViewController {
         liveTextSelectionView.isHidden = true
         liveTextSelectionView.isUserInteractionEnabled = false
         
-        print("✅ PDF view and LiveText overlay setup completed")
     }
     
     private func configurePDFScalingSafely(retryCount: Int = 0) {
@@ -980,7 +1156,6 @@ class ModernBookReaderViewController: UIViewController {
                     self.configurePDFScalingSafely(retryCount: retryCount + 1)
                 }
             } else {
-                print("⚠️ Failed to configure PDF scaling after 10 retries")
             }
             return
         }
@@ -1004,7 +1179,6 @@ class ModernBookReaderViewController: UIViewController {
                 let initialScale = min(max(fitScale, pdfView.minScaleFactor), pdfView.maxScaleFactor)
                 pdfView.scaleFactor = initialScale
                 
-                print("✅ PDF scaling configured: \(initialScale), page: \(pageRect), view: \(viewRect)")
             }
         }
         
@@ -1014,23 +1188,22 @@ class ModernBookReaderViewController: UIViewController {
         // Force layout
         pdfView.layoutIfNeeded()
         
-        print("✅ PDF scaling configured safely")
     }
     
     private func setupLiveTextForPDF() {
         guard #available(iOS 16.0, *) else {
-            print("📝 Live Text requires iOS 16.0 or later")
             return
         }
         
         guard let pdfView = pdfView,
               let currentPage = pdfView.currentPage else { return }
         
-        print("📝 Setting up Live Text for PDF...")
         
         // Analyze the current page
-        Task {
-            await analyzePDFPage(currentPage)
+        if #available(iOS 16.0, *) {
+            Task {
+                await analyzePDFPageOptimized(currentPage)
+            }
         }
     }
     
@@ -1070,23 +1243,189 @@ class ModernBookReaderViewController: UIViewController {
     private func updateReadingProgress() {
         // Calculate and update reading progress based on actual position
         var progress: Float = 0
-        
+        var currentPage: Int?
+        var totalPages: Int?
+
         if !textView.isHidden {
-            // For text view
             let contentHeight = textView.contentSize.height
             let offset = textView.contentOffset.y
             progress = Float(offset / max(contentHeight - textView.bounds.height, 1))
+
+            let estimatedPages = Int(ceil(contentHeight / max(textView.bounds.height, 1)))
+            if estimatedPages > 0 {
+                totalPages = estimatedPages
+                let derivedPage = Int(round(progress * Float(estimatedPages - 1))) + 1
+                currentPage = max(1, min(estimatedPages, derivedPage))
+            }
         } else if let pdfView = pdfView, !pdfView.isHidden {
-            // For PDF view
-            if let currentPage = pdfView.currentPage,
+            if let currentPageObj = pdfView.currentPage,
                let document = pdfView.document {
-                let pageIndex = document.index(for: currentPage)
-                let totalPages = document.pageCount
-                progress = Float(pageIndex) / Float(max(totalPages - 1, 1))
+                let pageIndex = document.index(for: currentPageObj)
+                let pageCount = document.pageCount
+                progress = Float(pageIndex) / Float(max(pageCount - 1, 1))
+                currentPage = pageIndex + 1
+                totalPages = pageCount
             }
         }
-        
+
+        lastKnownProgress = max(0, min(progress, 1))
+        lastKnownPage = currentPage
+        lastKnownTotalPages = totalPages
         readingProgressView.setProgress(progress, animated: true)
+        updateStatusHUD(page: currentPage, totalPages: totalPages, progress: progress)
+        updateNotesPeek(currentPage: currentPage)
+    }
+
+    private func updateStatusHUD(page: Int?, totalPages: Int?, progress: Float) {
+        let elapsed = currentSessionDuration
+        readingStatusHUD.update(page: page, totalPages: totalPages, percentage: progress, elapsed: elapsed)
+
+        let progressDouble = Double(max(progress, 0.0001))
+        if elapsed > 30, progressDouble < 1 {
+            let totalExpected = elapsed / progressDouble
+            let remaining = totalExpected - elapsed
+            if remaining.isFinite && remaining > 10 {
+                readingStatusHUD.updateEstimatedRemaining(remaining)
+            }
+        }
+    }
+
+    private func updateNotesPeek(currentPage: Int?) {
+        guard let book = currentBook, let page = currentPage else {
+            notesPeekView.update(highlights: 0, notes: 0)
+            return
+        }
+
+        let highlights = combinedHighlights(for: book.id).filter({ highlight -> Bool in
+            if let pageNumber = highlight.position.pageNumber {
+                return pageNumber == page
+            }
+            if !textView.isHidden,
+               totalTextLength > 0,
+               let pages = lastKnownTotalPages, pages > 0 {
+                let pageSize = max(1, totalTextLength / pages)
+                let pageIndex = highlight.position.startOffset / pageSize + 1
+                return pageIndex == page
+            }
+            return false
+        })
+
+        let notesArray = combinedNotes(for: book.id).filter({ note -> Bool in
+            if let pageNumber = note.position?.pageNumber {
+                return pageNumber == page
+            }
+            if !textView.isHidden,
+               let offset = note.position?.startOffset,
+               totalTextLength > 0,
+               let pages = lastKnownTotalPages, pages > 0 {
+                let pageSize = max(1, totalTextLength / pages)
+                let pageIndex = offset / pageSize + 1
+                return pageIndex == page
+            }
+            return false
+        })
+
+        let sessionNotes = combinedSessionNotes(for: book.id).filter { note in
+            guard let hint = note.pageHint else { return false }
+            return hint == page
+        }
+
+        notesPeekView.update(highlights: highlights.count, notes: notesArray.count + sessionNotes.count)
+    }
+
+    @objc private func handleFirebaseBooksUpdated() {
+        guard let currentId = currentBook?.id else { return }
+        if let refreshed = UnifiedFirebaseStorage.shared.books.first(where: { $0.id == currentId }) {
+            currentBook = refreshed
+            updateToolbarButtonStates()
+            updateNotesPeek(currentPage: lastKnownPage)
+        }
+    }
+
+    @objc private func handleNotesOrHighlightsChanged(_ notification: Notification) {
+        guard let bookId = currentBook?.id else { return }
+        if let notifiedBookId = notification.userInfo?["bookId"] as? String, notifiedBookId != bookId {
+            return
+        }
+        refreshCurrentBookSnapshot()
+        updateToolbarButtonStates()
+        updateNotesPeek(currentPage: lastKnownPage)
+    }
+
+    private func refreshCurrentBookSnapshot() {
+        guard let id = currentBook?.id else { return }
+        let books = BookStorage.shared.loadBooks()
+        if let updated = books.first(where: { $0.id == id }) {
+            currentBook = updated
+        }
+    }
+
+    private func combinedHighlights(for bookId: String) -> [Highlight] {
+        var merged = [String: Highlight]()
+
+        let sources: [[Highlight]] = [
+            NotesManager.shared.getHighlights(for: bookId),
+            UnifiedFirebaseStorage.shared.books.first(where: { $0.id == bookId })?.highlights ?? [],
+            currentBook?.id == bookId ? currentBook?.highlights ?? [] : []
+        ]
+
+        for highlights in sources {
+            for highlight in highlights {
+                merged[highlight.id] = highlight
+            }
+        }
+
+        return Array(merged.values)
+    }
+
+    private func bookmarkCount(for bookId: String) -> Int {
+        var identifiers = Set<String>()
+
+        BookmarkManager.shared.getBookmarks(for: bookId).forEach { identifiers.insert($0.id) }
+        if let remote = UnifiedFirebaseStorage.shared.books.first(where: { $0.id == bookId })?.bookmarks {
+            remote.forEach { identifiers.insert($0.id) }
+        }
+        if let local = currentBook?.bookmarks, currentBook?.id == bookId {
+            local.forEach { identifiers.insert($0.id) }
+        }
+
+        return identifiers.count
+    }
+
+    private func combinedNotes(for bookId: String) -> [Note] {
+        var merged = [String: Note]()
+
+        let sources: [[Note]] = [
+            NotesManager.shared.getNotes(for: bookId),
+            UnifiedFirebaseStorage.shared.books.first(where: { $0.id == bookId })?.notes ?? [],
+            currentBook?.id == bookId ? currentBook?.notes ?? [] : []
+        ]
+
+        for notes in sources {
+            for note in notes {
+                merged[note.id] = note
+            }
+        }
+
+        return Array(merged.values)
+    }
+    
+    private func combinedSessionNotes(for bookId: String) -> [BookSessionNote] {
+        var merged = [String: BookSessionNote]()
+
+        if let remote = UnifiedFirebaseStorage.shared.books.first(where: { $0.id == bookId })?.sessionNotes {
+            for note in remote {
+                merged[note.id] = note
+            }
+        }
+
+        if let current = currentBook, current.id == bookId {
+            for note in current.sessionNotes {
+                merged[note.id] = note
+            }
+        }
+
+        return Array(merged.values)
     }
     
     private func showBookReuploadOption(for book: Book) {
@@ -1245,27 +1584,38 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
         }
         statsAction.setValue(UIImage(systemName: "chart.bar.fill"), forKey: "image")
         actionSheet.addAction(statsAction)
-        
+
+        // Text-to-Speech
+        let ttsService = TextToSpeechService.shared
+        let ttsTitle: String
+        if ttsService.speaking {
+            ttsTitle = "Pause Text-to-Speech"
+        } else if ttsService.paused {
+            ttsTitle = "Resume Text-to-Speech"
+        } else {
+            ttsTitle = "Start Text-to-Speech"
+        }
+        let ttsAction = UIAlertAction(title: ttsTitle, style: .default) { [weak self] _ in
+            self?.didTapTextToSpeech()
+        }
+        ttsAction.setValue(UIImage(systemName: "waveform"), forKey: "image")
+        actionSheet.addAction(ttsAction)
+
+        // Personal Notes Workspace
+        if currentBook != nil {
+            let notesWorkspace = UIAlertAction(title: "My Notes", style: .default) { [weak self] _ in
+                self?.presentNotesWorkspace()
+            }
+            notesWorkspace.setValue(UIImage(systemName: "square.and.pencil"), forKey: "image")
+            actionSheet.addAction(notesWorkspace)
+        }
+
         // Search
         let searchAction = UIAlertAction(title: "Search", style: .default) { [weak self] _ in
             self?.didTapSearch()
         }
         searchAction.setValue(UIImage(systemName: "magnifyingglass"), forKey: "image")
         actionSheet.addAction(searchAction)
-        
-        // Add Bookmark
-        let addBookmarkAction = UIAlertAction(title: "Add Bookmark", style: .default) { [weak self] _ in
-            self?.showAddBookmarkView()
-        }
-        addBookmarkAction.setValue(UIImage(systemName: "bookmark.fill"), forKey: "image")
-        actionSheet.addAction(addBookmarkAction)
-        
-        // View Bookmarks
-        let viewBookmarksAction = UIAlertAction(title: "View Bookmarks", style: .default) { [weak self] _ in
-            self?.showBookmarksList()
-        }
-        viewBookmarksAction.setValue(UIImage(systemName: "list.bullet.rectangle"), forKey: "image")
-        actionSheet.addAction(viewBookmarksAction)
         
         // Notes & Highlights
         let notesAction = UIAlertAction(title: "Notes & Highlights", style: .default) { [weak self] _ in
@@ -1369,11 +1719,43 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
             }
         }
         
-        print("🖍️ PDF highlighting mode activated")
     }
     
     func didTapBookmarks() {
-        showBookmarkSidebar()
+        let sheet = UIAlertController(title: "Bookmarks", message: nil, preferredStyle: .actionSheet)
+
+        let quickAction = UIAlertAction(title: "Quick Bookmark", style: .default) { [weak self] _ in
+            self?.addQuickBookmark()
+        }
+        quickAction.setValue(UIImage(systemName: "bookmark.fill"), forKey: "image")
+        sheet.addAction(quickAction)
+
+        let detailedAction = UIAlertAction(title: "Add Bookmark with Note", style: .default) { [weak self] _ in
+            self?.showAddBookmarkView()
+        }
+        detailedAction.setValue(UIImage(systemName: "bookmark.square"), forKey: "image")
+        sheet.addAction(detailedAction)
+
+        let sidebarAction = UIAlertAction(title: "Bookmark Sidebar", style: .default) { [weak self] _ in
+            self?.showBookmarkSidebar()
+        }
+        sidebarAction.setValue(UIImage(systemName: "sidebar.left"), forKey: "image")
+        sheet.addAction(sidebarAction)
+
+        let listAction = UIAlertAction(title: "View All Bookmarks", style: .default) { [weak self] _ in
+            self?.showBookmarksList()
+        }
+        listAction.setValue(UIImage(systemName: "list.bullet.rectangle"), forKey: "image")
+        sheet.addAction(listAction)
+
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = floatingToolbar
+            popover.sourceRect = floatingToolbar.bounds
+        }
+
+        present(sheet, animated: true)
     }
     
     
@@ -1391,16 +1773,85 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
             return
         }
         
-        let notesVC = NotesAndHighlightsViewController(bookId: book.id)
+        let notesVC = BookNotesViewController(book: book,
+                                              focus: .highlights,
+                                              onHighlightSelected: { [weak self] highlight in
+                                                  self?.navigateToHighlight(highlight)
+                                              })
         notesVC.modalPresentationStyle = .pageSheet
-        
+
         if let sheet = notesVC.sheetPresentationController {
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true
         }
         
         present(notesVC, animated: true)
-        print("📝 Notes and highlights interface opened")
+    }
+
+    private func navigateToHighlight(_ highlight: Highlight) {
+        guard let pdfView = pdfView,
+              !pdfView.isHidden,
+              let document = pdfView.document else {
+            showAlert(title: "Highlights", message: "Open the PDF view to navigate to highlights.")
+            return
+        }
+
+        let targetPageIndex: Int
+        if let pageNumber = highlight.position.pageNumber, pageNumber > 0 {
+            targetPageIndex = pageNumber - 1
+        } else if let storedIndex = highlight.selectionRects?.first?.pageIndex {
+            targetPageIndex = storedIndex
+        } else {
+            showAlert(title: "Highlight", message: "Unable to locate this highlight in the document.")
+            return
+        }
+
+        guard targetPageIndex >= 0, targetPageIndex < document.pageCount,
+              let page = document.page(at: targetPageIndex) else {
+            showAlert(title: "Highlight", message: "That page is not available in the current document.")
+            return
+        }
+
+        pdfView.go(to: page)
+
+        let targetRect: CGRect? = {
+            if let rect = highlight.selectionRects?.first(where: { $0.pageIndex == targetPageIndex })?.cgRect {
+                return rect
+            }
+
+            guard let pageText = page.string else { return nil }
+            let normalized = highlight.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.isEmpty { return nil }
+
+            if let range = pageText.range(of: normalized) ?? pageText.range(of: normalized, options: [.caseInsensitive]) {
+                let nsRange = NSRange(range, in: pageText)
+                if let selection = page.selection(for: nsRange) {
+                    return selection.bounds(for: page)
+                }
+            }
+            return nil
+        }()
+
+        if let rect = targetRect {
+            let paddedRect = rect.insetBy(dx: -16, dy: -20)
+            pdfView.go(to: paddedRect, on: page)
+
+            if let pageText = page.string {
+                let normalized = highlight.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !normalized.isEmpty,
+                   let range = pageText.range(of: normalized) ?? pageText.range(of: normalized, options: [.caseInsensitive]) {
+                    let nsRange = NSRange(range, in: pageText)
+                    if let selection = page.selection(for: nsRange) {
+                        pdfView.setCurrentSelection(selection, animate: true)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                            pdfView.clearSelection()
+                        }
+                    }
+                }
+            }
+        }
+
+        showReadingTimerWidget()
     }
     
     private func didTapSearch() {
@@ -1433,77 +1884,109 @@ extension ModernBookReaderViewController: ModernFloatingToolbarDelegate {
     
     private func searchInPDF(_ searchText: String) {
         guard let pdfView = pdfView, let document = pdfView.document else { return }
-        
-        print("🔍 Searching for: \(searchText)")
-        
-        // Use PDFDocument's built-in search
-        let selections = document.findString(searchText, withOptions: [])
-        
-        if !selections.isEmpty {
-            // Go to the first match
-            if let firstSelection = selections.first,
-               let page = firstSelection.pages.first {
-                pdfView.go(to: page)
-                pdfView.setCurrentSelection(firstSelection, animate: true)
-                
-                showAlert(title: "Search Result", message: "Found \(selections.count) match(es). Use PDF gestures to navigate between results.")
-            }
-        } else {
-            showAlert(title: "Search Complete", message: "No matches found for '\(searchText)'")
+
+        lastSearchQuery = searchText
+        let selections = document.findString(searchText, withOptions: [.caseInsensitive, .diacriticInsensitive])
+
+        guard !selections.isEmpty else {
+            clearSearchResults()
+            showQuickHint("No matches for “\(searchText)”")
+            return
         }
+
+        presentSearchResults(selections, query: searchText, in: pdfView)
+    }
+
+    private func presentSearchResults(_ selections: [PDFSelection], query: String, in pdfView: PDFView) {
+        searchSelections = selections
+        searchResultIndex = 0
+        searchNavigator.update(term: query, currentIndex: 1, total: selections.count)
+        searchNavigator.isHidden = false
+        navigateToSearchResult(at: 0, in: pdfView)
+    }
+
+    private func navigateToSearchResult(at index: Int, in pdfView: PDFView) {
+        guard !searchSelections.isEmpty else { return }
+        let boundedIndex = max(0, min(index, searchSelections.count - 1))
+        searchResultIndex = boundedIndex
+
+        let selection = searchSelections[boundedIndex]
+        if let page = selection.pages.first {
+            pdfView.go(to: page)
+        }
+        pdfView.setCurrentSelection(selection, animate: true)
+        searchNavigator.update(term: lastSearchQuery, currentIndex: boundedIndex + 1, total: searchSelections.count)
+    }
+
+    private func clearSearchResults() {
+        searchSelections.removeAll()
+        searchResultIndex = 0
+        searchNavigator.isHidden = true
+        pdfView?.clearSelection()
     }
     
     private func didTapTextToSpeech() {
-        // Toggle text-to-speech
-        guard !extractedText.isEmpty || (pdfView?.isHidden == false) else {
-            showAlert(title: "Text-to-Speech", message: "No text content available to read")
-            return
-        }
-        
-        if AVSpeechSynthesizer().isSpeaking {
-            AVSpeechSynthesizer().stopSpeaking(at: .immediate)
-            showAlert(title: "Text-to-Speech", message: "Speech stopped")
+        let service = TextToSpeechService.shared
+
+        if service.speaking {
+            service.pause()
+        } else if service.paused {
+            service.resume()
         } else {
-            startTextToSpeech()
+            guard let textToSpeak = currentTextForSpeech(), !textToSpeak.isEmpty else {
+                showAlert(title: "Text-to-Speech", message: "No text content available to read")
+                return
+            }
+            service.startReading(text: textToSpeak)
         }
     }
-    
-    private func startTextToSpeech() {
-        let synthesizer = AVSpeechSynthesizer()
-        var textToSpeak = ""
-        
+
+    private func presentNotesWorkspace() {
+        guard let book = currentBook else { return }
+        let snapshot = BookNotesManager.shared.snapshot(for: book.id, bookTitle: book.title, fallbackBook: book)
+
+        var updatedBook = book
+        updatedBook.personalSummary = snapshot.personalSummary
+        updatedBook.keyTakeaways = snapshot.keyTakeaways
+        updatedBook.actionItems = snapshot.actionItems
+        updatedBook.sessionNotes = snapshot.sessionNotes
+        updatedBook.notesUpdatedAt = snapshot.notesUpdatedAt ?? Date()
+        currentBook = updatedBook
+
+        let notesVC = BookNotesViewController(
+            bookId: snapshot.bookId,
+            bookTitle: snapshot.bookTitle,
+            initialRecord: snapshot
+        )
+        let nav = UINavigationController(rootViewController: notesVC)
+        nav.modalPresentationStyle = .pageSheet
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+
+    private func currentTextForSpeech() -> String? {
         if !textView.isHidden && !extractedText.isEmpty {
-            // For text files
-            textToSpeak = extractedText
+            return extractedText
         } else if let pdfView = pdfView, !pdfView.isHidden, let currentPage = pdfView.currentPage {
-            // For PDF files - get text from current page
-            textToSpeak = currentPage.string ?? ""
+            return currentPage.string
         }
-        
-        guard !textToSpeak.isEmpty else {
-            showAlert(title: "Text-to-Speech", message: "No text content available to read")
-            return
-        }
-        
-        // Limit to first 1000 characters for demo
-        if textToSpeak.count > 1000 {
-            textToSpeak = String(textToSpeak.prefix(1000)) + "..."
-        }
-        
-        let utterance = AVSpeechUtterance(string: textToSpeak)
-        utterance.rate = 0.5
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        
-        synthesizer.speak(utterance)
-        showAlert(title: "Text-to-Speech", message: "Started reading...")
-        
-        print("🔊 Text-to-speech started")
+        return nil
     }
 }
 
 // MARK: - PDFHighlightHandlerDelegate
 extension ModernBookReaderViewController: PDFHighlightHandlerDelegate {
     func pdfHighlightHandler(_ handler: PDFHighlightHandler, didCreateHighlight highlight: Highlight) {
+        if var book = currentBook {
+            if !book.highlights.contains(where: { $0.id == highlight.id }) {
+                book.highlights.append(highlight)
+                currentBook = book
+            }
+        }
+        
         showQuickHint("✨ Highlighted!")
         updateToolbarButtonStates()
     }
@@ -1513,8 +1996,25 @@ extension ModernBookReaderViewController: PDFHighlightHandlerDelegate {
     }
     
     private func updateToolbarButtonStates() {
-        // Update any toolbar button states if needed
-        // This is a placeholder for future toolbar updates
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateToolbarButtonStates()
+            }
+            return
+        }
+
+        guard let book = currentBook else {
+            floatingToolbar.updateBookmarkCount(0)
+            floatingToolbar.updateHighlightCount(0)
+            notesPeekView.update(highlights: 0, notes: 0)
+            return
+        }
+
+        floatingToolbar.updateBookmarkCount(bookmarkCount(for: book.id))
+
+        let highlightCount = combinedHighlights(for: book.id).count
+        floatingToolbar.updateHighlightCount(highlightCount)
+        updateNotesPeek(currentPage: lastKnownPage)
     }
 }
 
@@ -1523,88 +2023,191 @@ extension ModernBookReaderViewController {
     
     private func startReadingSession() {
         guard currentBook != nil else { return }
-        
-        // Don't start if already running
-        if sessionTimer?.isValid == true {
-            return
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            if self.sessionTimer?.isValid == true {
+                return
+            }
+
+            self.stopAllTimers()
+
+            if self.accumulatedSessionDuration == 0 {
+                self.currentSessionDuration = 0
+            }
+
+            self.sessionStartTime = Date()
+            self.startSessionTimer()
+            self.startPositionSaveTimer()
+
+            if !self.isObservingAppLifecycle {
+                NotificationCenter.default.addObserver(self, selector: #selector(self.appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+                NotificationCenter.default.addObserver(self, selector: #selector(self.appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
+                self.isObservingAppLifecycle = true
+            }
+
+            self.readingTimerWidget?.resumeSession()
         }
-        
-        // Start session timer
-        sessionStartTime = Date()
-        currentSessionDuration = 0
-        
-        // Show reading timer widget
-        // showReadingTimerWidget() // Commented out - timer widget disabled
-        
-        // Update session duration every second
-        sessionTimer?.invalidate()
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    }
+    
+    private func startSessionTimer() {
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateSessionDuration()
         }
-        
-        // Start position save timer (save every 5 seconds)
-        positionSaveTimer?.invalidate()
-        positionSaveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.saveCurrentPosition()
+        RunLoop.main.add(timer, forMode: .common)
+        sessionTimer = timer
+    }
+
+    private func startPositionSaveTimer() {
+        let saveInterval: TimeInterval = isLargeDocument ? 10.0 : 5.0
+        let timer = Timer(timeInterval: saveInterval, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+
+            let currentProgress = self.getCurrentReadingProgress()
+            if abs(currentProgress - self.lastSavedPosition) > 0.01 {
+                self.saveCurrentPosition()
+                self.lastSavedPosition = currentProgress
+            }
         }
-        
-        // Listen for app lifecycle events
-        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
-        
-        print("📖 Started reading session for: \(currentBook?.title ?? "Unknown")")
+        RunLoop.main.add(timer, forMode: .common)
+        positionSaveTimer = timer
+    }
+
+    // MARK: - Timer Management Helper
+    private func stopAllTimers() {
+        let invalidateTimers: () -> Void = { [weak self] in
+            guard let self = self else { return }
+
+            if let startTime = self.sessionStartTime {
+                self.accumulatedSessionDuration += Date().timeIntervalSince(startTime)
+                self.sessionStartTime = nil
+            }
+
+            self.sessionTimer?.invalidate()
+            self.sessionTimer = nil
+            self.positionSaveTimer?.invalidate()
+            self.positionSaveTimer = nil
+
+            self.currentSessionDuration = self.accumulatedSessionDuration
+            self.readingTimerWidget?.pauseSession()
+        }
+
+        if Thread.isMainThread {
+            invalidateTimers()
+        } else {
+            DispatchQueue.main.async(execute: invalidateTimers)
+        }
+    }
+    
+    // Synchronous timer cleanup for deinit - safe to call from any thread
+    private func stopAllTimersSync() {
+        if let startTime = sessionStartTime {
+            accumulatedSessionDuration += Date().timeIntervalSince(startTime)
+            sessionStartTime = nil
+        }
+
+        sessionTimer?.invalidate()
+        sessionTimer = nil
+        positionSaveTimer?.invalidate()
+        positionSaveTimer = nil
+
+        currentSessionDuration = accumulatedSessionDuration
+        readingTimerWidget?.pauseSession()
+    }
+    
+    // Emergency cleanup method for when normal cleanup fails
+    private func emergencyCleanup() {
+        // Force cleanup all resources - use async to avoid blocking
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.sessionTimer?.invalidate()
+            self.positionSaveTimer?.invalidate()
+            self.readingTimerWidget?.endSession()
+            self.readingTimerWidget?.removeFromSuperview()
+            
+            // Clear all references
+            self.sessionTimer = nil
+            self.positionSaveTimer = nil
+            self.readingTimerWidget = nil
+        }
     }
     
     @objc private func appDidEnterBackground() {
         // Pause reading session when app goes to background
-        if sessionTimer != nil {
-            saveCurrentPosition()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.saveCurrentPositionImmediately()
+            self.saveCurrentPosition()
+            ThreadSafePositionManager.shared.saveAllPendingPositions()
             UnifiedReadingTracker.shared.pauseSession()
-            sessionTimer?.invalidate()
-            sessionTimer = nil
+            self.stopAllTimers()
         }
     }
-    
+
     @objc private func appWillEnterForeground() {
         // Resume reading session when app comes back
-        if currentBook != nil && view.window != nil {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  self.currentBook != nil,
+                  self.view.window != nil else { return }
+            
             UnifiedReadingTracker.shared.resumeSession()
-            // Restart internal timer
-            sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                self?.updateSessionDuration()
+            
+            if self.sessionTimer?.isValid != true {
+                self.sessionStartTime = Date()
+                self.startSessionTimer()
             }
+
+            if self.positionSaveTimer?.isValid != true {
+                self.startPositionSaveTimer()
+            }
+
+            self.readingTimerWidget?.setElapsedTime(self.currentSessionDuration)
+            self.readingTimerWidget?.resumeSession()
         }
     }
     
     private func endReadingSession() {
         guard let book = currentBook else { return }
         
-        // Hide reading timer widget
-        hideReadingTimerWidget()
-        
-        // End the reading session in unified tracker (it handles all stats)
-        UnifiedReadingTracker.shared.endSession()
-        
-        // Stop timers
-        sessionTimer?.invalidate()
-        sessionTimer = nil
-        positionSaveTimer?.invalidate()
-        positionSaveTimer = nil
-        
-        print("📚 Ended reading session")
+        // Ensure timer cleanup happens on main thread
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Hide reading timer widget first
+            self.hideReadingTimerWidget()
+            
+            // End the reading session in unified tracker
+            UnifiedReadingTracker.shared.endSession()
+            
+            // Stop all timers safely
+            self.stopAllTimers()
+            self.accumulatedSessionDuration = 0
+            self.currentSessionDuration = 0
+        }
     }
     
     private func updateSessionDuration() {
-        guard let startTime = sessionStartTime else { return }
-        currentSessionDuration = Date().timeIntervalSince(startTime)
-        
-        // Update UI if needed (you could show this in the navigation header)
-        let minutes = Int(currentSessionDuration) / 60
-        let seconds = Int(currentSessionDuration) % 60
-        print("⏱️ Reading time: \(minutes):\(String(format: "%02d", seconds))")
-        
-        // Update timer widget if visible
-        readingTimerWidget?.recordActivity()
+        guard let startTime = sessionStartTime else {
+            currentSessionDuration = accumulatedSessionDuration
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.readingTimerWidget?.setElapsedTime(self.currentSessionDuration)
+            }
+            return
+        }
+
+        let elapsed = accumulatedSessionDuration + Date().timeIntervalSince(startTime)
+        currentSessionDuration = elapsed
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.readingTimerWidget?.setElapsedTime(elapsed)
+            self.updateStatusHUD(page: self.lastKnownPage, totalPages: self.lastKnownTotalPages, progress: self.lastKnownProgress)
+        }
     }
     
     // MARK: - Reading Timer Widget
@@ -1634,47 +2237,137 @@ extension ModernBookReaderViewController {
         }
         
         widget.startSession()
-        print("📱 Modern reader timer widget shown")
+        widget.setElapsedTime(currentSessionDuration)
     }
     
     private func hideReadingTimerWidget() {
         guard let widget = readingTimerWidget else { return }
         
+        // End session first to stop internal timers
+        widget.endSession()
+        
+        // Animate removal
         UIView.animate(withDuration: 0.3, animations: {
             widget.alpha = 0
             widget.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
-        }) { _ in
+        }) { [weak self] _ in
             widget.removeFromSuperview()
+            self?.readingTimerWidget = nil
         }
-        
-        widget.endSession()
-        readingTimerWidget = nil
-        print("📱 Modern reader timer widget hidden")
     }
     
     private func saveCurrentPosition() {
         guard let book = currentBook else { return }
         
-        // Use unified reading tracker for position saving
+        let progress = getCurrentReadingProgress()
+
+        // Use thread-safe position manager for position saving
         if !textView.isHidden {
-            UnifiedReadingTracker.shared.savePosition(for: book.id, textView: textView, totalLength: extractedText.count)
+            let position = TrackerPosition.fromTextView(textView, bookId: book.id, totalLength: extractedText.count)
+            ThreadSafePositionManager.shared.updatePosition(position)
         } else if let pdfView = pdfView, !pdfView.isHidden {
-            UnifiedReadingTracker.shared.savePosition(for: book.id, pdfView: pdfView)
+            let position = TrackerPosition.fromPDFView(pdfView, bookId: book.id)
+            ThreadSafePositionManager.shared.updatePosition(position)
         }
+
+        readingTimerWidget?.recordActivity()
+        readingTimerWidget?.updateProgress(progress)
+    }
+    
+    private func saveCurrentPositionImmediately() {
+        guard let book = currentBook else { return }
+        
+        // Save position directly to Firebase without debouncing
+        if !textView.isHidden {
+            let contentHeight = textView.contentSize.height
+            let offset = textView.contentOffset.y
+            let progress = Float(offset / max(contentHeight - textView.bounds.height, 1))
+            
+            UnifiedFirebaseStorage.shared.updateReadingProgress(
+                bookId: book.id,
+                position: progress
+            ) { result in
+            }
+        } else if let pdfView = pdfView, !pdfView.isHidden {
+            let pageIndex = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) } ?? 0
+            let totalPages = pdfView.document?.pageCount ?? 1
+            let progress = Float(pageIndex) / Float(max(totalPages - 1, 1))
+            
+            UnifiedFirebaseStorage.shared.updateReadingProgress(
+                bookId: book.id,
+                position: progress
+            ) { result in
+            }
+        }
+        
+        // Also force save any pending positions
+        ThreadSafePositionManager.shared.saveAllPendingPositions()
     }
     
     private func restoreLastPosition() {
         guard let book = currentBook else { return }
         
-        // Use unified reading tracker for position restoration
+        
+        // Load position from Firebase/local storage
         if !textView.isHidden {
+            // For text books, use UnifiedReadingTracker
             UnifiedReadingTracker.shared.restorePosition(for: book.id, in: textView)
         } else if let pdfView = pdfView, !pdfView.isHidden {
-            UnifiedReadingTracker.shared.restorePosition(for: book.id, in: pdfView)
+            // For PDFs, check if book has saved position
+            let savedPosition = book.lastReadPosition
+            if savedPosition > 0 {
+                
+                guard let document = pdfView.document else { return }
+                let totalPages = document.pageCount
+                let targetPage = Int(savedPosition * Float(totalPages - 1))
+                
+                if targetPage >= 0 && targetPage < totalPages {
+                    if let page = document.page(at: targetPage) {
+                        pdfView.go(to: page)
+                        
+                        // Also update the last saved position for the timer
+                        self.lastSavedPosition = savedPosition
+                    }
+                }
+            } else {
+            }
         }
         
-        // Update progress view based on saved position
+        // Update progress view
         updateReadingProgress()
+    }
+    
+    
+    private func configurePDFScalingOptimized() {
+        guard let pdfView = pdfView,
+              let document = pdfView.document,
+              document.pageCount > 0 else { return }
+        
+        // Simplified scaling configuration
+        pdfView.autoScales = true
+        
+        // Set minimum and maximum scale factors for better UX
+        pdfView.minScaleFactor = 0.25
+        pdfView.maxScaleFactor = isLargeDocument ? 3.0 : 5.0 // Lower max for large docs
+        
+        // Use fit-to-width as default for better reading experience
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            pdfView.scaleFactor = pdfView.scaleFactorForSizeToFit
+        }
+    }
+    
+    private func getCurrentReadingProgress() -> Float {
+        if !textView.isHidden {
+            let contentHeight = textView.contentSize.height
+            let offset = textView.contentOffset.y
+            return Float(offset / max(contentHeight - textView.bounds.height, 1))
+        } else if let pdfView = pdfView,
+                  let document = pdfView.document,
+                  let currentPage = pdfView.currentPage {
+            let pageIndex = document.index(for: currentPage)
+            return Float(pageIndex) / Float(max(document.pageCount - 1, 1))
+        }
+        return 0.0
     }
 }
 
@@ -1682,7 +2375,6 @@ extension ModernBookReaderViewController: ModernNavigationHeaderDelegate {
     func didTapBack() {
         // Check if we're in a navigation stack
         if let navController = navigationController, navController.viewControllers.count > 1 {
-            print("🔙 Going back to library from modern reader...")
             navigationController?.popViewController(animated: true)
         } else {
             // Fallback to dismiss if presented modally
@@ -1695,7 +2387,6 @@ extension ModernBookReaderViewController: ModernNavigationHeaderDelegate {
         guard let book = currentBook else { return }
         
         // Add bookmark logic here
-        print("🔖 Adding bookmark for: \(book.title)")
     }
 }
 
@@ -1745,6 +2436,86 @@ extension ModernBookReaderViewController: PDFViewDelegate {
     }
 }
 
+// MARK: - SearchNavigatorViewDelegate
+extension ModernBookReaderViewController: SearchNavigatorViewDelegate {
+    func searchNavigatorDidTapNext(_ navigator: SearchNavigatorView) {
+        guard let pdfView = pdfView else { return }
+        let nextIndex = searchResultIndex + 1
+        navigateToSearchResult(at: nextIndex >= searchSelections.count ? 0 : nextIndex, in: pdfView)
+    }
+
+    func searchNavigatorDidTapPrevious(_ navigator: SearchNavigatorView) {
+        guard let pdfView = pdfView else { return }
+        let previousIndex = searchResultIndex - 1
+        navigateToSearchResult(at: previousIndex < 0 ? searchSelections.count - 1 : previousIndex, in: pdfView)
+    }
+
+    func searchNavigatorDidTapClose(_ navigator: SearchNavigatorView) {
+        clearSearchResults()
+    }
+}
+
+// MARK: - NotesPeekViewDelegate
+extension ModernBookReaderViewController: NotesPeekViewDelegate {
+    func notesPeekViewDidTapOpen(_ view: NotesPeekView) {
+        didTapNotes()
+    }
+}
+
+extension ModernBookReaderViewController: TTSMiniControllerViewDelegate {
+    func ttsControllerDidTapPlay(_ controller: TTSMiniControllerView) {
+        let service = TextToSpeechService.shared
+        if service.paused {
+            service.resume()
+        } else if !service.speaking {
+            guard let text = currentTextForSpeech(), !text.isEmpty else {
+                showQuickHint("No readable text")
+                return
+            }
+            service.startReading(text: text)
+        }
+    }
+
+    func ttsControllerDidTapPause(_ controller: TTSMiniControllerView) {
+        TextToSpeechService.shared.pause()
+    }
+
+    func ttsControllerDidTapStop(_ controller: TTSMiniControllerView) {
+        TextToSpeechService.shared.stop()
+    }
+}
+
+// MARK: - TextToSpeechDelegate
+extension ModernBookReaderViewController: TextToSpeechDelegate {
+    func speechDidStart() {
+        ttsControllerView.isHidden = false
+        ttsControllerView.alpha = 1
+        ttsControllerView.setState(.playing)
+    }
+
+    func speechDidPause() {
+        ttsControllerView.setState(.paused)
+    }
+
+    func speechDidResume() {
+        ttsControllerView.setState(.playing)
+    }
+
+    func speechDidStop() {
+        ttsControllerView.setState(.idle)
+        ttsControllerView.updateProgress(0)
+        ttsControllerView.isHidden = true
+    }
+
+    func speechDidFinish() {
+        speechDidStop()
+    }
+
+    func speechDidUpdatePosition(_ position: Int) {
+        let progress = TextToSpeechService.shared.progress
+        ttsControllerView.updateProgress(progress)
+    }
+}
 // MARK: - AddBookmarkViewDelegate
 extension ModernBookReaderViewController: AddBookmarkViewDelegate {
     
@@ -1783,6 +2554,7 @@ extension ModernBookReaderViewController: AddBookmarkViewDelegate {
         
         // Show confirmation
         showBookmarkConfirmation()
+        updateToolbarButtonStates()
     }
     
     func addBookmarkViewDidCancel(_ view: AddBookmarkView) {
@@ -1827,7 +2599,6 @@ extension ModernBookReaderViewController: ImageAnalysisInteractionDelegate {
     func interaction(_ interaction: ImageAnalysisInteraction, highlightSelectedItemsDidChange highlightSelectedItems: Bool) {
         // Handle highlight changes if needed
         if highlightSelectedItems {
-            print("📝 Live Text: Text selected")
         }
     }
     
@@ -1840,10 +2611,8 @@ extension ModernBookReaderViewController: ImageAnalysisInteractionDelegate {
 // MARK: - BookSearchDelegate
 extension ModernBookReaderViewController: BookSearchDelegate {
     func bookSearch(_ searchView: BookSearchView, didSelectResult result: BookSearchResult) {
-        print("🔍 Search result selected: Page \(result.pageNumber)")
         
         guard let pdfView = pdfView else {
-            print("❌ No PDF view available")
             return
         }
         
@@ -1851,13 +2620,11 @@ extension ModernBookReaderViewController: BookSearchDelegate {
         if let selection = result.selection,
            let page = selection.pages.first {
             
-            print("📍 Navigating to page using selection")
             pdfView.go(to: page)
             
             // Highlight the selection temporarily
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 pdfView.setCurrentSelection(selection, animate: true)
-                print("✅ Selection highlighted")
                 
                 // Clear selection after showing it
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -1869,7 +2636,6 @@ extension ModernBookReaderViewController: BookSearchDelegate {
                   result.pageNumber > 0 && result.pageNumber <= document.pageCount {
             
             // Fallback: navigate by page number
-            print("📍 Navigating to page \(result.pageNumber) using page number")
             let page = document.page(at: result.pageNumber - 1)
             pdfView.go(to: page!)
             
@@ -1877,7 +2643,6 @@ extension ModernBookReaderViewController: BookSearchDelegate {
             showPageNavigationFeedback(pageNumber: result.pageNumber)
             
         } else {
-            print("❌ Could not navigate to search result")
             showAlert(title: "Navigation Error", message: "Could not navigate to page \(result.pageNumber)")
         }
     }
@@ -1922,7 +2687,6 @@ extension ModernBookReaderViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let selectedURL = urls.first else { return }
         
-        print("📁 Selected file for re-upload: \(selectedURL)")
         
         // Find the book that needs re-uploading
         guard let bookToUpdate = bookPendingReupload else {
@@ -1945,54 +2709,56 @@ extension ModernBookReaderViewController: UIDocumentPickerDelegate {
         // Validate file before processing
         switch SecurityValidator.validateFileUpload(at: selectedURL) {
         case .failure(let error):
-            print("❌ File validation failed: \(error.localizedDescription)")
             self.showQuickHint("Invalid file: \(error.localizedDescription)")
             return
         case .success:
-            print("✅ File validation passed")
+            break
         }
         
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let sanitizedFileName = SecurityValidator.sanitizeFileName(selectedURL.lastPathComponent)
-        let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
-        
-        do {
-            // Remove existing file if it exists
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
+        // Perform file operations on background thread to avoid blocking UI
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
             
-            // Copy the file
-            try FileManager.default.copyItem(at: selectedURL, to: destinationURL)
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let sanitizedFileName = SecurityValidator.sanitizeFileName(selectedURL.lastPathComponent)
+            let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
             
-            // Upload to Firebase and update the book
-            UnifiedFirebaseStorage.shared.uploadBook(
-                fileURL: destinationURL, 
-                title: bookToUpdate.title, 
-                author: bookToUpdate.author
-            ) { [weak self] result in
-                DispatchQueue.main.async {
+            do {
+                // Remove existing file if it exists
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try FileManager.default.removeItem(at: destinationURL)
+                }
+                
+                // Copy the file
+                try FileManager.default.copyItem(at: selectedURL, to: destinationURL)
+                
+                // Upload to Firebase and update the book
+                UnifiedFirebaseStorage.shared.uploadBook(
+                    fileURL: destinationURL, 
+                    title: bookToUpdate.title, 
+                    author: bookToUpdate.author
+                ) { [weak self] result in
+                    DispatchQueue.main.async {
                     switch result {
                     case .success(let updatedBook):
-                        print("✅ Book re-uploaded successfully: \(updatedBook.title)")
                         // Update the current book with new file path
                         self?.currentBook = updatedBook
                         // Try loading the book again
                         self?.loadBookContent(updatedBook)
                     case .failure(let error):
-                        print("❌ Failed to re-upload book: \(error)")
                         self?.showErrorMessage("Failed to upload file: \(error.localizedDescription)")
                     }
                 }
             }
-            
-        } catch {
-            showErrorMessage("Error copying file: \(error.localizedDescription)")
+            } catch {
+                DispatchQueue.main.async {
+                    self.showErrorMessage("Error copying file: \(error.localizedDescription)")
+                }
+            }
         }
     }
     
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        print("📁 Document picker cancelled")
         bookPendingReupload = nil // Clear the reference
     }
 }

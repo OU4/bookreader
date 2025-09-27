@@ -41,11 +41,9 @@ class AuthenticationManager: NSObject, ObservableObject {
             self?.isAuthenticated = user != nil
             
             if let user = user {
-                print("✅ User authenticated: \(user.uid)")
                 // Update last login time
                 self?.updateLastLoginTime()
             } else {
-                print("❌ User not authenticated")
             }
         }
     }
@@ -191,7 +189,6 @@ class AuthenticationManager: NSObject, ObservableObject {
             "lastLoginTime": FieldValue.serverTimestamp()
         ]) { error in
             if let error = error {
-                print("Error updating last login time: \(error)")
             }
         }
     }
@@ -247,11 +244,9 @@ extension AuthenticationManager: ASAuthorizationControllerDelegate {
                 fatalError("Invalid state: A login callback was received, but no login request was sent.")
             }
             guard let appleIDToken = appleIDCredential.identityToken else {
-                print("Unable to fetch identity token")
                 return
             }
             guard let idTokenString = String(data: appleIDToken, encoding: .utf8) else {
-                print("Unable to serialize token string from data: \(appleIDToken.debugDescription)")
                 return
             }
             
@@ -264,7 +259,6 @@ extension AuthenticationManager: ASAuthorizationControllerDelegate {
             Auth.auth().signIn(with: credential) { [weak self] (authResult, error) in
                 if let error = error {
                     self?.errorMessage = error.localizedDescription
-                    print("Error signing in with Apple: \(error)")
                     return
                 }
                 
@@ -274,7 +268,6 @@ extension AuthenticationManager: ASAuthorizationControllerDelegate {
                     changeRequest.displayName = appleIDCredential.fullName?.givenName
                     changeRequest.commitChanges { error in
                         if let error = error {
-                            print("Error updating profile: \(error)")
                         }
                     }
                 }
@@ -284,7 +277,6 @@ extension AuthenticationManager: ASAuthorizationControllerDelegate {
     
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
         errorMessage = error.localizedDescription
-        print("Sign in with Apple failed: \(error)")
     }
 }
 

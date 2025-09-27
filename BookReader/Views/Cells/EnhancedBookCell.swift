@@ -162,8 +162,6 @@ class EnhancedBookCell: UICollectionViewCell {
     
     // MARK: - Configuration
     func configure(with book: Book) {
-        print("DEBUG EnhancedBookCell: Configuring cell with book: \(book.title)")
-        print("DEBUG EnhancedBookCell: Cell frame: \(frame)")
         titleLabel.text = book.title
         authorLabel.text = book.author
         

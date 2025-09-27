@@ -16,6 +16,7 @@ class ReadingTimerWidget: UIView {
     private var lastActivityTime: Date = Date()
     private var idleThreshold: TimeInterval = 30 // 30 seconds of inactivity
     private var isAutoPaused = false
+    private var accumulatedTime: TimeInterval = 0
     
     // MARK: - UI Components
     private lazy var containerView: UIView = {
@@ -127,7 +128,6 @@ class ReadingTimerWidget: UIView {
     // MARK: - Initialization
     override init(frame: CGRect) {
         super.init(frame: frame)
-        print("🏗️ ReadingTimerWidget initialized with frame: \(frame)")
         setupUI()
         setupConstraints()
         // Don't start timer here - wait for startSession() to be called
@@ -135,7 +135,6 @@ class ReadingTimerWidget: UIView {
     
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        print("🏗️ ReadingTimerWidget initialized from coder")
         setupUI()
         setupConstraints()
         // Don't start timer here - wait for startSession() to be called
@@ -222,14 +221,14 @@ class ReadingTimerWidget: UIView {
     private func startTimer() {
         // Stop any existing timer first
         stopTimer()
-        
-        sessionStartTime = Date()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.updateTimer()
             }
         }
-        print("⏰ Timer started at: \(sessionStartTime!)")
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
     
     private func stopTimer() {
@@ -238,35 +237,34 @@ class ReadingTimerWidget: UIView {
     }
     
     private func updateTimer() {
-        guard let startTime = sessionStartTime else { 
-            print("❌ No session start time - cannot update timer")
-            return 
-        }
-        
-        // Check for idle state
         let timeSinceLastActivity = Date().timeIntervalSince(lastActivityTime)
-        
+
         if timeSinceLastActivity > idleThreshold && !isAutoPaused {
-            // Auto-pause due to inactivity
             autoPauseForInactivity()
             return
         }
-        
-        let elapsed = Date().timeIntervalSince(startTime)
+
+        let elapsed = totalElapsedTime()
+        updateTimerLabel(for: elapsed)
+        updateReadingStats(elapsed: elapsed)
+    }
+
+    private func totalElapsedTime() -> TimeInterval {
+        if let start = sessionStartTime {
+            return accumulatedTime + Date().timeIntervalSince(start)
+        }
+        return accumulatedTime
+    }
+
+    private func updateTimerLabel(for elapsed: TimeInterval) {
         let minutes = Int(elapsed) / 60
         let seconds = Int(elapsed) % 60
-        
-        let timeString = String(format: "%02d:%02d", minutes, seconds)
-        timerLabel.text = timeString
-        
-        print("⏱️ Timer updated: \(timeString) (elapsed: \(elapsed)s)")
-        
-        // Update reading stats
-        updateReadingStats()
+        timerLabel.text = String(format: "%02d:%02d", minutes, seconds)
     }
     
     private func autoPauseForInactivity() {
         isAutoPaused = true
+        captureElapsedTime()
         stopTimer()
         updateStatus("Auto-paused")
         
@@ -299,16 +297,15 @@ class ReadingTimerWidget: UIView {
     
     func recordActivity() {
         lastActivityTime = Date()
-        print("📝 Activity recorded at: \(lastActivityTime)")
         
         if isAutoPaused {
-            print("🔄 Resuming from auto-pause")
             resumeFromAutoPause()
         }
     }
     
     private func resumeFromAutoPause() {
         isAutoPaused = false
+        sessionStartTime = Date()
         startTimer()
         updateStatus("Reading")
         
@@ -321,21 +318,15 @@ class ReadingTimerWidget: UIView {
     }
     
     // MARK: - Stats Update
-    func updateReadingStats() {
-        // Update reading speed using time-based estimate
-        if let startTime = sessionStartTime {
-            let elapsed = Date().timeIntervalSince(startTime)
-            if elapsed > 30 { // Only show after 30 seconds for better accuracy
-                // Simple time-based estimate
-                let estimatedWordsRead = Int(elapsed / 3) // Assume 1 word per 3 seconds average
-                let wpm = Int(Double(estimatedWordsRead) / (elapsed / 60.0))
-                wpmLabel.text = "\(max(wpm, 50))\nWPM" // Minimum reasonable reading speed
-            } else {
-                wpmLabel.text = "...\nWPM"
-            }
+    private func updateReadingStats(elapsed: TimeInterval) {
+        if elapsed > 30 {
+            let estimatedWordsRead = Int(elapsed / 3)
+            let wpm = Int(Double(estimatedWordsRead) / max(elapsed / 60.0, 1))
+            wpmLabel.text = "\(max(wpm, 50))\nWPM"
+        } else {
+            wpmLabel.text = "...\nWPM"
         }
-        
-        // Update daily goal progress using UnifiedReadingTracker
+
         let (_, percentage) = UnifiedReadingTracker.shared.getTodayProgress()
         let progressPercentage = Int(percentage)
         
@@ -436,25 +427,31 @@ class ReadingTimerWidget: UIView {
     
     // MARK: - Public Methods
     func startSession() {
-        print("🚀 ReadingTimerWidget startSession() called")
-        lastActivityTime = Date() // Reset activity time
-        isAutoPaused = false // Reset auto-pause state
+        accumulatedTime = 0
+        lastActivityTime = Date()
+        isAutoPaused = false
+        sessionStartTime = Date()
+        updateTimerLabel(for: 0)
         updateStatus("Reading")
         startTimer()
-        print("✅ ReadingTimerWidget session started successfully")
     }
-    
+
     func pauseSession() {
+        guard timer != nil || sessionStartTime != nil else { return }
+        captureElapsedTime()
         stopTimer()
         updateStatus("Paused")
     }
     
     func resumeSession() {
+        guard timer == nil else { return }
+        sessionStartTime = Date()
         startTimer()
         updateStatus("Reading")
     }
-    
+
     func endSession() {
+        captureElapsedTime()
         stopTimer()
         updateStatus("Finished")
         
@@ -463,8 +460,28 @@ class ReadingTimerWidget: UIView {
             self.closeWidget()
         }
     }
-    
+
     deinit {
         stopTimer()
+    }
+
+    func setElapsedTime(_ elapsed: TimeInterval) {
+        if let start = sessionStartTime {
+            let interval = Date().timeIntervalSince(start)
+            accumulatedTime = max(0, elapsed - interval)
+        } else {
+            accumulatedTime = max(0, elapsed)
+        }
+        updateTimerLabel(for: elapsed)
+        updateReadingStats(elapsed: elapsed)
+    }
+
+    private func captureElapsedTime() {
+        if let start = sessionStartTime {
+            accumulatedTime += Date().timeIntervalSince(start)
+            sessionStartTime = nil
+        }
+        updateTimerLabel(for: accumulatedTime)
+        updateReadingStats(elapsed: accumulatedTime)
     }
 }

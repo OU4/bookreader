@@ -172,8 +172,6 @@ class BookSearchView: UIView {
         self.currentBook = book
         self.pdfDocument = pdfDocument
         
-        print("🔍 Search view shown for book: \(book.title)")
-        print("📄 PDF document available: \(pdfDocument != nil)")
         
         alpha = 0
         containerView.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
@@ -200,10 +198,8 @@ class BookSearchView: UIView {
     // MARK: - Search Implementation
     
     private func performSearch(_ query: String) {
-        print("🔍 Performing search for: '\(query)'")
         
         guard !query.isEmpty else {
-            print("❌ Empty search query")
             searchResults = []
             tableView.reloadData()
             emptyStateLabel.isHidden = true
@@ -221,43 +217,34 @@ class BookSearchView: UIView {
             }
             
             if let pdfDocument = pdfDocument {
-                print("📄 Searching in PDF document")
                 await searchPDF(query: query, document: pdfDocument)
             } else if let book = currentBook {
-                print("📖 Searching in text file")
                 searchTextFile(query: query, book: book)
             } else {
-                print("❌ No document available for search")
             }
         }
     }
     
     private func searchPDF(query: String, document: PDFDocument) async {
-        print("📄 Starting PDF search for: '\(query)'")
         var results: [BookSearchResult] = []
         
         // Check if Live Text is available
         if #available(iOS 16.0, *), ImageAnalyzer.isSupported {
-            print("✅ Live Text is available")
             await MainActor.run {
                 self.statusLabel.text = "Using Live Text to search..."
             }
         } else {
-            print("⚠️ Live Text not available, using standard search")
         }
         
         // Use PDFKit's built-in search (works with Live Text)
         let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
-        print("🔍 Searching PDF with options: \(options)")
         
         await withTaskCancellationHandler {
             let selections = document.findString(query, withOptions: options)
-            print("📄 Found \(selections.count) selections for '\(query)'")
             
             // Limit results to prevent UI overload
             let limitedSelections = Array(selections.prefix(100))
             if selections.count > 100 {
-                print("⚠️ Limited results to first 100 out of \(selections.count) matches")
             }
             
             for (index, selection) in limitedSelections.enumerated() {
@@ -268,7 +255,6 @@ class BookSearchView: UIView {
                     
                     // Validate page index
                     guard pageIndex >= 0 && pageIndex < document.pageCount else {
-                        print("⚠️ Invalid page index: \(pageIndex) for document with \(document.pageCount) pages")
                         continue
                     }
                     
@@ -305,7 +291,6 @@ class BookSearchView: UIView {
                     results.append(result)
                     
                     if results.count <= 5 {
-                        print("🔍 Added result \(results.count): Page \(pageIndex + 1), context: '\(context.prefix(50))...'")
                     }
                 }
                 
@@ -319,7 +304,6 @@ class BookSearchView: UIView {
             }
             
             await MainActor.run {
-                print("📊 Final results: \(results.count) items")
                 self.searchResults = results
                 self.tableView.reloadData()
                 self.loadingIndicator.stopAnimating()
@@ -335,13 +319,10 @@ class BookSearchView: UIView {
                 
                 if results.isEmpty {
                     self.emptyStateLabel.text = "No results for \"\(query)\""
-                    print("❌ No results found for '\(query)'")
                 } else {
-                    print("✅ Search completed with \(results.count) results")
                 }
             }
         } onCancel: {
-            print("Search cancelled")
         }
     }
     
@@ -402,24 +383,18 @@ extension BookSearchView: UITableViewDataSource, UITableViewDelegate {
         guard let cell = gesture.view as? BookSearchResultCell else { return }
         let row = cell.tag
         
-        print("🎯 Cell tapped via gesture recognizer: row \(row)")
         
         if row < searchResults.count {
             let result = searchResults[row]
-            print("🔍 Search result tapped via gesture: Page \(result.pageNumber)")
             delegate?.bookSearch(self, didSelectResult: result)
             hide()
         }
     }
     
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        print("🎯 didSelectRowAt called for row \(indexPath.row)")
         tableView.deselectRow(at: indexPath, animated: true)
         let result = searchResults[indexPath.row]
         
-        print("🔍 Search result tapped: Page \(result.pageNumber)")
-        print("🔗 Delegate available: \(delegate != nil)")
-        print("📄 Selection available: \(result.selection != nil)")
         
         delegate?.bookSearch(self, didSelectResult: result)
         hide()
@@ -435,7 +410,6 @@ extension BookSearchView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         let locationInContainer = touch.location(in: containerView)
         let shouldReceive = !containerView.bounds.contains(locationInContainer)
-        print("🤚 Gesture recognizer shouldReceive: \(shouldReceive), location: \(locationInContainer)")
         return shouldReceive
     }
     
@@ -523,12 +497,10 @@ class BookSearchResultCell: UITableViewCell {
         }
         
         contextLabel.attributedText = attributedString
-        print("🔧 Configured cell: Page \(result.pageNumber), matched: '\(searchText)', context: '\(result.context.prefix(30))...'")
     }
     
     override func setSelected(_ selected: Bool, animated: Bool) {
         super.setSelected(selected, animated: animated)
-        print("📱 Cell selection changed: \(selected)")
         
         UIView.animate(withDuration: 0.2) {
             self.containerView.backgroundColor = selected ? .tertiarySystemBackground : .secondarySystemBackground
@@ -537,7 +509,6 @@ class BookSearchResultCell: UITableViewCell {
     
     override func setHighlighted(_ highlighted: Bool, animated: Bool) {
         super.setHighlighted(highlighted, animated: animated)
-        print("✨ Cell highlighted: \(highlighted)")
         
         UIView.animate(withDuration: 0.1) {
             self.containerView.transform = highlighted ? CGAffineTransform(scaleX: 0.98, y: 0.98) : .identity

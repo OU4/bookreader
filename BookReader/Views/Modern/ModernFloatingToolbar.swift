@@ -18,6 +18,10 @@ class ModernFloatingToolbar: UIView {
     
     weak var delegate: ModernFloatingToolbarDelegate?
     
+    private var highlightCount = 0
+    private var bookmarkCount = 0
+    private var isHighlightModeActive = false
+    
     // MARK: - UI Components
     private lazy var blurEffect: UIBlurEffect = {
         return UIBlurEffect(style: .systemUltraThinMaterial)
@@ -50,11 +54,13 @@ class ModernFloatingToolbar: UIView {
         icon: "highlighter",
         action: #selector(highlightTapped)
     )
+    private lazy var highlightBadge = createBadgeLabel()
     
     private lazy var bookmarksButton = createModernButton(
         icon: "bookmark.circle.fill",
         action: #selector(bookmarksTapped)
     )
+    private lazy var bookmarkBadge = createBadgeLabel()
     
     private lazy var moreButton = createModernButton(
         icon: "ellipsis.circle.fill",
@@ -88,7 +94,9 @@ class ModernFloatingToolbar: UIView {
         stackView.addArrangedSubview(moreButton)
         
         blurView.contentView.addSubview(stackView)
-        
+        highlightButton.addSubview(highlightBadge)
+        bookmarksButton.addSubview(bookmarkBadge)
+
         NSLayoutConstraint.activate([
             // Blur view
             blurView.topAnchor.constraint(equalTo: topAnchor),
@@ -103,13 +111,23 @@ class ModernFloatingToolbar: UIView {
             stackView.trailingAnchor.constraint(lessThanOrEqualTo: blurView.contentView.trailingAnchor, constant: -20)
         ])
         
+        NSLayoutConstraint.activate([
+            highlightBadge.topAnchor.constraint(equalTo: highlightButton.topAnchor, constant: -4),
+            highlightBadge.trailingAnchor.constraint(equalTo: highlightButton.trailingAnchor, constant: 4),
+            bookmarkBadge.topAnchor.constraint(equalTo: bookmarksButton.topAnchor, constant: -4),
+            bookmarkBadge.trailingAnchor.constraint(equalTo: bookmarksButton.trailingAnchor, constant: 4)
+        ])
+
         // Add subtle shadow
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOffset = CGSize(width: 0, height: 8)
         layer.shadowRadius = 20
         layer.shadowOpacity = 0.15
+
+        applyHighlightButtonAppearance()
+        applyBookmarkButtonAppearance()
     }
-    
+
     private func createModernButton(icon: String, action: Selector) -> UIButton {
         let button = UIButton(type: .system)
         
@@ -137,6 +155,21 @@ class ModernFloatingToolbar: UIView {
         button.addTarget(self, action: #selector(buttonTouchUp(_:)), for: [.touchUpInside, .touchUpOutside])
         
         return button
+    }
+
+    private func createBadgeLabel() -> UILabel {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.backgroundColor = UIColor.systemRed
+        label.textColor = .white
+        label.font = UIFont.systemFont(ofSize: 10, weight: .bold)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 9
+        label.layer.masksToBounds = true
+        label.isHidden = true
+        label.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 18).isActive = true
+        return label
     }
     
     private func addAnimationEffects() {
@@ -178,17 +211,15 @@ class ModernFloatingToolbar: UIView {
     
     // Method to show highlight mode state
     func setHighlightMode(active: Bool) {
+        isHighlightModeActive = active
         UIView.animate(withDuration: 0.3) {
             if active {
-                // Highlight mode is active - make button more prominent
-                self.highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.3)
+                self.highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.35)
                 self.highlightButton.tintColor = .systemOrange
-                self.highlightButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
+                self.highlightButton.transform = CGAffineTransform(scaleX: 1.08, y: 1.08)
             } else {
-                // Normal state
-                self.highlightButton.backgroundColor = UIColor.white.withAlphaComponent(0.15)
-                self.highlightButton.tintColor = .label
                 self.highlightButton.transform = .identity
+                self.applyHighlightButtonAppearance()
             }
         }
     }
@@ -235,27 +266,44 @@ class ModernFloatingToolbar: UIView {
     }
     
     // MARK: - Content Updates
-    func updateHighlightButtonState(hasHighlights: Bool) {
+    func updateHighlightCount(_ count: Int) {
+        highlightCount = max(0, count)
+        guard !isHighlightModeActive else { return }
         UIView.animate(withDuration: 0.2) {
-            if hasHighlights {
-                self.highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.3)
-                self.highlightButton.tintColor = UIColor.systemOrange
-            } else {
-                self.highlightButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
-                self.highlightButton.tintColor = .label
-            }
+            self.applyHighlightButtonAppearance()
         }
     }
-    
-    func updateBookmarkButtonState(hasBookmarks: Bool) {
+
+    func updateBookmarkCount(_ count: Int) {
+        bookmarkCount = max(0, count)
         UIView.animate(withDuration: 0.2) {
-            if hasBookmarks {
-                self.bookmarksButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.3)
-                self.bookmarksButton.tintColor = UIColor.systemBlue
-            } else {
-                self.bookmarksButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
-                self.bookmarksButton.tintColor = .label
-            }
+            self.applyBookmarkButtonAppearance()
+        }
+    }
+
+    private func applyHighlightButtonAppearance() {
+        if highlightCount > 0 {
+            highlightButton.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.25)
+            highlightButton.tintColor = UIColor.systemOrange
+            highlightBadge.isHidden = false
+            highlightBadge.text = highlightCount > 9 ? "9+" : "\(highlightCount)"
+        } else {
+            highlightButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
+            highlightButton.tintColor = .label
+            highlightBadge.isHidden = true
+        }
+    }
+
+    private func applyBookmarkButtonAppearance() {
+        if bookmarkCount > 0 {
+            bookmarksButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.25)
+            bookmarksButton.tintColor = UIColor.systemBlue
+            bookmarkBadge.isHidden = false
+            bookmarkBadge.text = bookmarkCount > 9 ? "9+" : "\(bookmarkCount)"
+        } else {
+            bookmarksButton.backgroundColor = UIColor.label.withAlphaComponent(0.1)
+            bookmarksButton.tintColor = .label
+            bookmarkBadge.isHidden = true
         }
     }
     

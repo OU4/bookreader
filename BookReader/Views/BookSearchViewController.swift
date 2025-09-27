@@ -216,7 +216,6 @@ class BookSearchViewController: UIViewController {
                 attributedText.addAttribute(.font, value: UIFont.boldSystemFont(ofSize: 14), range: match.range)
             }
         } catch {
-            print("Regex error: \(error)")
         }
         
         return attributedText

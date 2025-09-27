@@ -138,7 +138,6 @@ class BookmarkManager {
         bookmarks.append(bookmark)
         saveBookmarks(bookmarks)
         
-        print("📑 Added bookmark: \(title) for \(bookTitle)")
         return bookmark
     }
     
@@ -246,7 +245,6 @@ class BookmarkManager {
             bookmarks[index] = updatedBookmark
             saveBookmarks(bookmarks)
             
-            print("📝 Updated bookmark: \(updatedBookmark.title)")
         }
     }
     
@@ -255,7 +253,6 @@ class BookmarkManager {
         bookmarks.removeAll { $0.id == bookmark.id }
         saveBookmarks(bookmarks)
         
-        print("🗑️ Deleted bookmark: \(bookmark.title)")
     }
     
     func deleteBookmark(withId id: String) {
@@ -263,7 +260,6 @@ class BookmarkManager {
         bookmarks.removeAll { $0.id == id }
         saveBookmarks(bookmarks)
         
-        print("🗑️ Deleted bookmark with ID: \(id)")
     }
     
     // MARK: - Retrieval Methods
@@ -304,7 +300,6 @@ class BookmarkManager {
             pdfView.go(to: page)
         }
         
-        print("📍 Navigated to bookmark: \(bookmark.title) - Page \(pageNumber)")
         return true
     }
     
@@ -317,7 +312,6 @@ class BookmarkManager {
             textView.scrollRangeToVisible(nsRange)
         }
         
-        print("📍 Navigated to bookmark: \(bookmark.title) - Offset \(textOffset)")
         return true
     }
     

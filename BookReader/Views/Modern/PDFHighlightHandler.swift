@@ -138,19 +138,27 @@ class PDFHighlightHandler: NSObject {
     // MARK: - Highlight Creation
     private func createHighlight(from selection: PDFSelection, color: UIColor, colorName: String) {
         guard let bookId = bookId,
+              let pdfView = pdfView,
+              let document = pdfView.document,
               let selectedText = selection.string,
-              !selectedText.isEmpty else { return }
-        
-        // Apply visual highlight to PDF
+              !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // Collect selection rects per page
+        var selectionRects: [SelectionRect] = []
         for page in selection.pages {
             let bounds = selection.bounds(for: page)
-            
-            let highlight = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-            highlight.color = color
-            page.addAnnotation(highlight)
+            guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else { continue }
+            let pageIndex = document.index(for: page)
+            selectionRects.append(SelectionRect(pageIndex: pageIndex, rect: bounds))
+
+            // Apply visual highlight immediately
+            let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+            annotation.color = color
+            annotation.contents = selectedText
+            page.addAnnotation(annotation)
         }
-        
-        // Create highlight model
+
+        // Create highlight model with best-effort offsets
         let highlightColor: Highlight.HighlightColor
         switch colorName {
         case "Yellow": highlightColor = .yellow
@@ -159,21 +167,58 @@ class PDFHighlightHandler: NSObject {
         case "Pink": highlightColor = .pink
         default: highlightColor = .yellow
         }
-        
-        // Get page number
-        let pageNumber = pdfView?.document?.index(for: selection.pages.first ?? PDFPage()) ?? 0
-        
+
+        let firstPageIndex = selectionRects.first?.pageIndex ?? document.index(for: selection.pages.first ?? PDFPage())
+        let pageNumber = max(firstPageIndex, 0) + 1
+
+        var startOffset = 0
+        var endOffset = selectedText.count
+
+        if let firstPage = selection.pages.first,
+           let pageText = firstPage.string,
+           !pageText.isEmpty {
+            let normalizedSelection = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalizedSelection.isEmpty {
+                let candidates: [Range<String.Index>] = {
+                    var ranges: [Range<String.Index>] = []
+                    if let range = pageText.range(of: normalizedSelection) {
+                        ranges.append(range)
+                    }
+                    if let range = pageText.range(of: normalizedSelection, options: [.caseInsensitive]) {
+                        ranges.append(range)
+                    }
+                    if normalizedSelection.count > 8 {
+                        let prefix = String(normalizedSelection.prefix(min(normalizedSelection.count, 32)))
+                        if let range = pageText.range(of: prefix, options: [.caseInsensitive]) {
+                            ranges.append(range)
+                        }
+                    }
+                    return ranges
+                }()
+
+                if let match = candidates.first {
+                    let nsRange = NSRange(match, in: pageText)
+                    startOffset = nsRange.location
+                    endOffset = nsRange.location + nsRange.length
+                }
+            }
+        }
+
+        let textPosition = TextPosition(
+            startOffset: startOffset,
+            endOffset: endOffset,
+            chapter: nil,
+            pageNumber: pageNumber
+        )
+
         let highlight = Highlight(
             text: selectedText,
             color: highlightColor,
-            position: TextPosition(
-                startOffset: 0,
-                endOffset: selectedText.count,
-                pageNumber: pageNumber + 1
-            )
+            position: textPosition,
+            note: nil,
+            selectionRects: selectionRects.isEmpty ? nil : selectionRects
         )
-        
-        // Save to storage
+
         UnifiedFirebaseStorage.shared.addHighlight(highlight, bookId: bookId) { [weak self] result in
             guard let self = self else { return }
             
@@ -195,14 +240,12 @@ class PDFHighlightHandler: NSObject {
     func loadExistingHighlights() {
         guard let bookId = bookId else { return }
         
-        print("🔄 Loading existing highlights for book: \(bookId)")
         
-        // Add a small delay to ensure PDF is fully loaded
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        // Load highlights asynchronously without artificial delay
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             UnifiedFirebaseStorage.shared.loadHighlights(bookId: bookId) { [weak self] highlights in
                 DispatchQueue.main.async {
-                    print("📥 Received \(highlights.count) highlights from storage")
-                    self?.applyHighlights(highlights)
+                    self?.applyHighlightsOptimized(highlights)
                 }
             }
         }
@@ -213,62 +256,110 @@ class PDFHighlightHandler: NSObject {
         loadExistingHighlights()
     }
     
-    private func applyHighlights(_ highlights: [Highlight]) {
+    private func applyHighlightsOptimized(_ highlights: [Highlight]) {
         guard let pdfView = pdfView,
               let document = pdfView.document else { return }
         
-        print("📝 Applying \(highlights.count) highlights to PDF")
         
+        // Group highlights by page for efficient processing
+        var highlightsByPage: [Int: [Highlight]] = [:]
         for highlight in highlights {
-            guard let pageNumber = highlight.position.pageNumber,
-                  pageNumber > 0,
-                  pageNumber <= document.pageCount,
-                  let page = document.page(at: pageNumber - 1) else {
-                print("❌ Invalid page number \(highlight.position.pageNumber ?? -1) for highlight: \(highlight.text)")
-                continue
-            }
-            
-            // Search for the highlight text on the page
-            guard let pageText = page.string else {
-                print("❌ No text found on page \(pageNumber)")
-                continue
-            }
-            
-            // Try to find the text case-insensitively first
-            var range = pageText.range(of: highlight.text, options: .caseInsensitive)
-            
-            // If not found, try exact match
-            if range == nil {
-                range = pageText.range(of: highlight.text)
-            }
-            
-            // If still not found, try finding a substring
-            if range == nil {
-                let cleanText = highlight.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if cleanText.count > 10 { // Only try substring for longer text
-                    let prefix = String(cleanText.prefix(cleanText.count - 5))
-                    range = pageText.range(of: prefix, options: .caseInsensitive)
-                }
-            }
-            
-            if let range = range {
-                let nsRange = NSRange(range, in: pageText)
-                if let selection = page.selection(for: nsRange) {
-                    let bounds = selection.bounds(for: page)
-                    let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-                    annotation.color = highlight.color.uiColor.withAlphaComponent(0.5)
-                    annotation.contents = highlight.text // Store original text
-                    page.addAnnotation(annotation)
-                    print("✅ Applied highlight: \(highlight.text.prefix(50))...")
-                } else {
-                    print("❌ Could not create selection for range on page \(pageNumber)")
-                }
+            let pageIndex: Int?
+            if let pageNumber = highlight.position.pageNumber,
+               pageNumber > 0,
+               pageNumber <= document.pageCount {
+                pageIndex = pageNumber - 1
+            } else if let rectIndex = highlight.selectionRects?.first?.pageIndex,
+                      rectIndex >= 0,
+                      rectIndex < document.pageCount {
+                pageIndex = rectIndex
             } else {
-                print("❌ Text not found on page \(pageNumber): \(highlight.text.prefix(50))...")
+                pageIndex = nil
             }
+
+            guard let pageIndex else { continue }
+            if highlightsByPage[pageIndex] == nil {
+                highlightsByPage[pageIndex] = []
+            }
+            highlightsByPage[pageIndex]?.append(highlight)
         }
         
-        print("✅ Finished applying highlights")
+        // Process each page only once in background
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            for (pageIndex, pageHighlights) in highlightsByPage {
+                autoreleasepool {
+                    self?.processHighlightsForPage(pageIndex, highlights: pageHighlights, document: document)
+                }
+            }
+            
+            DispatchQueue.main.async {
+                pdfView.layoutDocumentView()
+            }
+        }
+    }
+    
+    private func processHighlightsForPage(_ pageIndex: Int, highlights: [Highlight], document: PDFDocument) {
+        guard let page = document.page(at: pageIndex) else { return }
+
+        let pageText = page.string ?? ""
+        let searchOptions: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+
+        var annotationsToAdd: [(CGRect, Highlight)] = []
+
+        for highlight in highlights {
+            autoreleasepool {
+                if let rects = highlight.selectionRects?.filter({ $0.pageIndex == pageIndex }),
+                   !rects.isEmpty {
+                    rects.forEach { annotationsToAdd.append(($0.cgRect, highlight)) }
+                } else if let rect = self.findHighlightRect(highlight, in: page, pageText: pageText, searchOptions: searchOptions) {
+                    annotationsToAdd.append((rect, highlight))
+                }
+            }
+        }
+
+        DispatchQueue.main.async {
+            for (bounds, highlight) in annotationsToAdd {
+                let duplicates = page.annotations.filter { existing in
+                    existing.bounds.equalTo(bounds) && (existing.contents == highlight.text || existing.contents == nil)
+                }
+                duplicates.forEach { page.removeAnnotation($0) }
+
+                let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+                annotation.color = highlight.color.uiColor.withAlphaComponent(0.5)
+                annotation.contents = highlight.text
+                page.addAnnotation(annotation)
+            }
+        }
+    }
+    
+    private func findHighlightRect(_ highlight: Highlight, in page: PDFPage, pageText: String, searchOptions: NSString.CompareOptions) -> CGRect? {
+        // Fast text matching with fallback strategies
+        var range: Range<String.Index>?
+        
+        // Strategy 1: Case-insensitive search
+        range = pageText.range(of: highlight.text, options: searchOptions)
+        
+        // Strategy 2: Exact match
+        if range == nil {
+            range = pageText.range(of: highlight.text)
+        }
+        
+        // Strategy 3: Fuzzy matching for longer text
+        if range == nil && highlight.text.count > 15 {
+            let cleanText = highlight.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let searchText = String(cleanText.prefix(min(cleanText.count - 3, 50))) // Limit search length
+            range = pageText.range(of: searchText, options: searchOptions)
+        }
+        
+        guard let textRange = range else { return nil }
+        let nsRange = NSRange(textRange, in: pageText)
+        guard let selection = page.selection(for: nsRange) else { return nil }
+        return selection.bounds(for: page)
+    }
+    
+    // Legacy method for backward compatibility
+    private func applyHighlights(_ highlights: [Highlight]) {
+        applyHighlightsOptimized(highlights)
     }
 }
 

@@ -65,6 +65,8 @@ class UnifiedReadingTracker {
     // MARK: - Properties
     private var currentSession: ReadingSession?
     private var sessionTimer: Timer?
+    private var sessionResumeDate: Date?
+    private var sessionAccumulatedDuration: TimeInterval = 0
     private let userDefaults = UserDefaults.standard
     
     // Storage keys
@@ -96,67 +98,72 @@ class UnifiedReadingTracker {
             startTime: Date(),
             startPosition: book.lastReadPosition
         )
-        
-        // Start timer
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateSessionDuration()
-        }
-        
+        sessionAccumulatedDuration = 0
+        sessionResumeDate = Date()
+        startSessionTimer()
+
         // Update last read date
         updateLastReadDate()
         
-        print("📖 Started reading session for: \(book.title)")
     }
-    
+
     func pauseSession() {
         sessionTimer?.invalidate()
         sessionTimer = nil
-        
-        if let session = currentSession {
-            updateSessionDuration()
-            saveCurrentSession()
-            print("⏸️ Paused reading session")
+
+        if let resumeDate = sessionResumeDate {
+            sessionAccumulatedDuration += Date().timeIntervalSince(resumeDate)
+            sessionResumeDate = nil
         }
+
+        updateSessionDuration()
     }
-    
+
     func resumeSession() {
         guard currentSession != nil else { return }
-        
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateSessionDuration()
-        }
-        
-        print("▶️ Resumed reading session")
+
+        sessionResumeDate = Date()
+        startSessionTimer()
     }
-    
+
     func endSession() {
-        guard let session = currentSession else { return }
-        
-        // Stop timer
+        guard var session = currentSession else { return }
+
         sessionTimer?.invalidate()
         sessionTimer = nil
-        
-        // Update session
-        var finalSession = session
-        finalSession.endTime = Date()
+
+        if let resumeDate = sessionResumeDate {
+            sessionAccumulatedDuration += Date().timeIntervalSince(resumeDate)
+            sessionResumeDate = nil
+        }
+
         updateSessionDuration()
-        
-        // Save session
-        saveSession(finalSession)
-        
-        // Update stats
-        updateReadingStats(with: finalSession)
-        
-        // Clear current session
+
+        session.endTime = Date()
+        session.duration = sessionAccumulatedDuration
+
+        saveSession(session)
+        updateReadingStats(with: session)
+
         currentSession = nil
+        sessionAccumulatedDuration = 0
         
-        print("🏁 Ended reading session. Duration: \(Int(finalSession.duration / 60)) minutes")
     }
-    
+
     private func updateSessionDuration() {
         guard var session = currentSession else { return }
-        session.duration = Date().timeIntervalSince(session.startTime)
+
+        let elapsed = sessionAccumulatedDuration + (sessionResumeDate.map { Date().timeIntervalSince($0) } ?? 0)
+        session.duration = elapsed
         currentSession = session
+    }
+
+    private func startSessionTimer() {
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateSessionDuration()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sessionTimer = timer
     }
     
     // MARK: - Position Management
@@ -255,7 +262,6 @@ class UnifiedReadingTracker {
             pdfView.scaleFactor = zoomScale
         }
         
-        print("📍 Restored PDF position: page \(pageIndex + 1)")
     }
     
     func restorePosition(for bookId: String, in textView: UITextView) {
@@ -269,7 +275,6 @@ class UnifiedReadingTracker {
             }
         }
         
-        print("📍 Restored text position: offset \(textOffset)")
     }
     
     // MARK: - Goal Management

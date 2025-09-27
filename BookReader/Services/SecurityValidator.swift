@@ -90,9 +90,9 @@ class SecurityValidator {
             return .invalidFileName
         }
         
-        // Check for path traversal attempts
-        let dangerousPatterns = ["../", "..", "~/", "/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\0"]
-        for pattern in dangerousPatterns {
+        // Check for path traversal attempts (only check for actual path traversal patterns)
+        let pathTraversalPatterns = ["../", "~/../", "\\..\\"]
+        for pattern in pathTraversalPatterns {
             if fileName.contains(pattern) {
                 return .pathTraversalAttempt
             }
@@ -103,9 +103,9 @@ class SecurityValidator {
             return .invalidFileName
         }
         
-        // Check for valid characters (alphanumeric, spaces, dots, dashes, underscores)
-        let allowedCharacterSet = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-_")
-        if fileName.rangeOfCharacter(from: allowedCharacterSet.inverted) != nil {
+        // Check for dangerous characters only (not restrictive on normal filename characters)
+        let dangerousCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\0")
+        if fileName.rangeOfCharacter(from: dangerousCharacters) != nil {
             return .invalidFileName
         }
         

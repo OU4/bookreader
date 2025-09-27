@@ -13,6 +13,10 @@ enum BookCellStyle {
     case detailed
 }
 
+protocol ModernBookCellDelegate: AnyObject {
+    func didTapDeleteButton(for book: Book, in cell: ModernBookCell)
+}
+
 class ModernBookCell: UICollectionViewCell {
     
     // MARK: - Properties
@@ -141,7 +145,27 @@ class ModernBookCell: UICollectionViewCell {
         return view
     }()
     
+    private lazy var deleteButton: UIButton = {
+        let button = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        button.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: config), for: .normal)
+        button.tintColor = .systemRed
+        button.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.9)
+        button.layer.cornerRadius = 15
+        button.layer.shadowColor = UIColor.black.cgColor
+        button.layer.shadowOffset = CGSize(width: 0, height: 2)
+        button.layer.shadowRadius = 4
+        button.layer.shadowOpacity = 0.1
+        button.addTarget(self, action: #selector(deleteButtonTapped), for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isHidden = true // Hidden by default, show on hover/long press
+        return button
+    }()
+    
     private var progressWidthConstraint: NSLayoutConstraint!
+    
+    // Delegate for delete action
+    weak var delegate: ModernBookCellDelegate?
     
     // MARK: - Initialization
     override init(frame: CGRect) {
@@ -167,6 +191,7 @@ class ModernBookCell: UICollectionViewCell {
         containerView.addSubview(progressLabel)
         containerView.addSubview(statusBadge)
         containerView.addSubview(recentBadge)
+        containerView.addSubview(deleteButton)
         
         progressContainer.addSubview(progressBar)
         statusBadge.addSubview(statusLabel)
@@ -240,7 +265,13 @@ class ModernBookCell: UICollectionViewCell {
             recentBadge.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 8),
             recentBadge.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 8),
             recentBadge.widthAnchor.constraint(equalToConstant: 12),
-            recentBadge.heightAnchor.constraint(equalToConstant: 12)
+            recentBadge.heightAnchor.constraint(equalToConstant: 12),
+            
+            // Delete button
+            deleteButton.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 8),
+            deleteButton.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 8),
+            deleteButton.widthAnchor.constraint(equalToConstant: 30),
+            deleteButton.heightAnchor.constraint(equalToConstant: 30)
         ])
     }
     
@@ -252,6 +283,11 @@ class ModernBookCell: UICollectionViewCell {
         // Add hover effect for larger screens
         let hoverGesture = UIHoverGestureRecognizer(target: self, action: #selector(hoverGestureChanged(_:)))
         containerView.addGestureRecognizer(hoverGesture)
+        
+        // Add long press gesture for mobile devices
+        let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(longPressGestureChanged(_:)))
+        longPressGesture.minimumPressDuration = 0.5
+        containerView.addGestureRecognizer(longPressGesture)
     }
     
     override func layoutSubviews() {
@@ -264,8 +300,6 @@ class ModernBookCell: UICollectionViewCell {
         self.book = book
         self.style = style
         
-        print("DEBUG ModernBookCell: Configuring cell with book: \(book.title)")
-        print("DEBUG ModernBookCell: Cell frame: \(frame)")
         
         titleLabel.text = book.title
         authorLabel.text = book.author
@@ -452,12 +486,55 @@ class ModernBookCell: UICollectionViewCell {
                 self.containerView.layer.shadowOpacity = 0.2
                 self.containerView.layer.shadowRadius = 16
             }
+            showDeleteButton()
         case .ended, .cancelled:
             UIView.animate(withDuration: 0.2) {
                 self.containerView.transform = .identity
                 self.containerView.layer.shadowOpacity = 0.1
                 self.containerView.layer.shadowRadius = 12
             }
+            hideDeleteButton()
+        default:
+            break
+        }
+    }
+    
+    @objc private func deleteButtonTapped() {
+        guard let book = book else { return }
+        delegate?.didTapDeleteButton(for: book, in: self)
+    }
+    
+    private func showDeleteButton() {
+        deleteButton.isHidden = false
+        UIView.animate(withDuration: 0.2, delay: 0.1, options: [.curveEaseOut]) {
+            self.deleteButton.alpha = 1.0
+            self.deleteButton.transform = CGAffineTransform(scaleX: 1.0, y: 1.0)
+        }
+    }
+    
+    private func hideDeleteButton() {
+        UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseIn]) {
+            self.deleteButton.alpha = 0.0
+            self.deleteButton.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        } completion: { _ in
+            self.deleteButton.isHidden = true
+        }
+    }
+    
+    @objc private func longPressGestureChanged(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // Provide haptic feedback
+            let impact = UIImpactFeedbackGenerator(style: .medium)
+            impact.impactOccurred()
+            
+            showDeleteButton()
+            
+            // Auto-hide after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.hideDeleteButton()
+            }
+            
         default:
             break
         }

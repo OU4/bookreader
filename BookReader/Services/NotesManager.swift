@@ -13,14 +13,22 @@ class NotesManager {
     private init() {}
     
     // MARK: - Highlights Management
-    func addHighlight(to bookId: String, text: String, color: Highlight.HighlightColor, position: TextPosition, note: String? = nil) {
+    func addHighlight(
+        to bookId: String,
+        text: String,
+        color: Highlight.HighlightColor,
+        position: TextPosition,
+        note: String? = nil,
+        selectionRects: [SelectionRect]? = nil
+    ) {
         var highlights = loadHighlights(for: bookId)
         
         let highlight = Highlight(
             text: text,
             color: color,
             position: position,
-            note: note
+            note: note,
+            selectionRects: selectionRects
         )
         
         highlights.append(highlight)

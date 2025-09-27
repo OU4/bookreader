@@ -148,7 +148,6 @@ class ReadingPositionManager {
         )
         
         savePosition(position)
-        print("📍 Enhanced PDF position saved: Page \(pageIndex + 1)/\(document.pageCount), point: \(pagePoint), scroll: \(scrollOffset), zoom: \(zoomScale)x, mode: \(displayMode)")
     }
     
     /// Force save position (e.g., when app goes to background)
@@ -227,7 +226,6 @@ class ReadingPositionManager {
               pageIndex < document.pageCount,
               let page = document.page(at: pageIndex) else { return }
         
-        print("📍 Starting enhanced PDF position restoration: Page \(pageIndex + 1), precision level: \(position.precisionLevel)")
         
         // Set display mode first if available
         if let displayModeString = position.displayMode {
@@ -281,7 +279,6 @@ class ReadingPositionManager {
             
             // Validate saved point is still within page bounds
             guard currentPageBounds.contains(savedPoint) || attempt <= 2 else {
-                print("⚠️ Saved point \(savedPoint) outside page bounds \(currentPageBounds), using fallback")
                 self.performFallbackRestore(pdfView: pdfView, position: position, page: page)
                 return
             }
@@ -305,7 +302,6 @@ class ReadingPositionManager {
                 scrollView.setContentOffset(validatedOffset, animated: false)
             }
             
-            print("📍 Attempt \(attempt): Applied destination and scroll restoration")
         }
         
         // Step 3: Validation and retry logic
@@ -315,11 +311,9 @@ class ReadingPositionManager {
             let isAccurate = self.validateRestoration(pdfView: pdfView, position: position, page: page)
             
             if !isAccurate && attempt < maxAttempts {
-                print("🔄 Position not accurate, retrying... (\(attempt)/\(maxAttempts))")
                 self.performEnhancedRestore(pdfView: pdfView, position: position, page: page, attempt: attempt + 1)
             } else {
                 let status = isAccurate ? "✅ Precise" : "⚠️ Best effort"
-                print("\(status) position restoration completed after \(attempt) attempts")
             }
         }
     }
@@ -358,7 +352,6 @@ class ReadingPositionManager {
             let destination = PDFDestination(page: page, at: fallbackPoint)
             pdfView.go(to: destination)
             
-            print("📍 Used fallback restoration with \(Int(scrollPercentage * 100))% progress")
         }
     }
     
@@ -379,7 +372,6 @@ class ReadingPositionManager {
                     textView.setContentOffset(targetPoint, animated: true)
                 }
                 
-                print("📍 Restored text to character \(textOffset)")
             } else if let scrollPercentage = position.scrollPercentage {
                 // Fallback to percentage-based scrolling with better precision
                 let contentHeight = textView.contentSize.height
@@ -388,7 +380,6 @@ class ReadingPositionManager {
                 let targetOffset = CGFloat(scrollPercentage) * maxOffset
                 
                 textView.setContentOffset(CGPoint(x: 0, y: targetOffset), animated: true)
-                print("📍 Restored text to \(Int(scrollPercentage * 100))% position")
             }
         }
     }
@@ -488,7 +479,6 @@ class ReadingPositionManager {
             }
         }
         
-        print("✅ Applied \(highlights.count) highlights to PDF")
     }
     
     private func saveHighlight(_ highlight: PDFHighlight) {

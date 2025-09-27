@@ -103,6 +103,11 @@ class HighlightCell: UITableViewCell {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        dateLabel.text = "Created: \(formatter.string(from: highlight.dateCreated))"
+        var components: [String] = []
+        if let pageNumber = highlight.position.pageNumber {
+            components.append("Page \(pageNumber)")
+        }
+        components.append("Created: \(formatter.string(from: highlight.dateCreated))")
+        dateLabel.text = components.joined(separator: " • ")
     }
 }

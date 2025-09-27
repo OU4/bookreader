@@ -30,10 +30,18 @@ class UnifiedFirebaseStorage: ObservableObject {
     private var pendingOperations: [PendingOperation] = []
     private let operationQueue = DispatchQueue(label: "firebase.operations", qos: .utility)
     
+    // Retry configuration
+    private let maxRetryAttempts = 3
+    private let retryDelay: TimeInterval = 2.0
+    
+    // Network monitoring
+    private var networkCancellable: AnyCancellable?
+    
     // MARK: - Init
     private init() {
         setupFirestore()
         setupAuthListener()
+        setupNetworkMonitoring()
     }
     
     private func setupFirestore() {
@@ -48,11 +56,9 @@ class UnifiedFirebaseStorage: ObservableObject {
         FirebaseManager.shared.$currentUser
             .sink { [weak self] user in
                 if let user = user {
-                    print("🔥 User authenticated: \(user.uid), starting unified storage")
                     self?.startListening()
                     self?.processOfflineOperations()
                 } else {
-                    print("🔥 User signed out, stopping unified storage")
                     self?.stopListening()
                     DispatchQueue.main.async {
                         self?.books = []
@@ -60,6 +66,16 @@ class UnifiedFirebaseStorage: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+    
+    private func setupNetworkMonitoring() {
+        networkCancellable = NetworkMonitor.shared.$isConnected
+            .sink { [weak self] isConnected in
+                if isConnected {
+                    self?.processOfflineOperations()
+                } else {
+                }
+            }
     }
     
     // MARK: - Listening
@@ -76,7 +92,6 @@ class UnifiedFirebaseStorage: ObservableObject {
             .addSnapshotListener { [weak self] snapshot, error in
                 if let error = error {
                     self?.error = error
-                    print("❌ Error listening to books: \(error)")
                     return
                 }
                 
@@ -107,7 +122,6 @@ class UnifiedFirebaseStorage: ObservableObject {
                 let jsonData = try JSONSerialization.data(withJSONObject: data)
                 return try JSONDecoder().decode(Book.self, from: jsonData)
             } catch {
-                print("❌ Failed to decode book: \(error)")
                 return nil
             }
         }
@@ -174,8 +188,8 @@ class UnifiedFirebaseStorage: ObservableObject {
                 let bookTimestamp = Timestamp(date: Date())
                 
                 if existingTimestamp.dateValue() > bookTimestamp.dateValue() {
-                    // Server version is newer, merge changes
-                    let mergedData = self.mergeBookData(existing: existingData, new: bookData)
+                    // Server version is newer, use enhanced conflict resolution
+                    let mergedData = self.resolveConflict(local: bookData, remote: existingData)
                     transaction.setData(mergedData, forDocument: docRef)
                 } else {
                     // Our version is newer or same, update normally
@@ -352,7 +366,7 @@ class UnifiedFirebaseStorage: ObservableObject {
         operationQueue.async { [weak self] in
             guard let self = self else { return }
             
-            if Reachability.isConnectedToNetwork() {
+            if NetworkMonitor.shared.isConnected {
                 self.executeOperation(operation, userId: userId, completion: completion)
             } else {
                 self.pendingOperations.append(operation)
@@ -409,33 +423,27 @@ class UnifiedFirebaseStorage: ObservableObject {
             
             guard document.exists,
                   var data = document.data() else {
-                print("❌ Document doesn't exist or has no data for bookId: \(bookId)")
                 return nil
             }
             
             // Get existing bookmarks or create empty array if none exist
             var bookmarks = data["bookmarks"] as? [[String: Any]] ?? []
-            print("📚 Found \(bookmarks.count) existing bookmarks in document")
             
             switch operation {
             case .addBookmark(let bookmark):
                 guard let bookmarkData = try? JSONEncoder().encode(bookmark).toDictionary() else {
-                    print("❌ Failed to encode bookmark data")
                     return nil
                 }
                 bookmarks.append(bookmarkData)
-                print("📝 Added bookmark. Total bookmarks now: \(bookmarks.count)")
             case .removeBookmark(let bookmarkId):
                 let countBefore = bookmarks.count
                 bookmarks.removeAll { bookmarkDict in
                     bookmarkDict["id"] as? String == bookmarkId
                 }
-                print("🗑️ Removed bookmark. Count before: \(countBefore), after: \(bookmarks.count)")
             }
             
             data["bookmarks"] = bookmarks
             data["lastModified"] = Timestamp(date: Date())
-            print("💾 Updating document with \(bookmarks.count) bookmarks")
             transaction.setData(data, forDocument: docRef)
             
             return nil
@@ -467,34 +475,39 @@ class UnifiedFirebaseStorage: ObservableObject {
                 return nil
             }
             
-            guard document.exists,
-                  var data = document.data() else {
-                print("❌ Document doesn't exist or has no data for bookId: \(bookId)")
-                return nil
+            var data: [String: Any]
+            
+            if document.exists, let existingData = document.data() {
+                // Document exists, use existing data
+                data = existingData
+            } else {
+                // Document doesn't exist, create minimal book document
+                data = [
+                    "id": bookId,
+                    "highlights": [],
+                    "bookmarks": [],
+                    "notes": [],
+                    "lastModified": Timestamp(date: Date())
+                ]
             }
             
             // Get existing highlights or create empty array if none exist
             var highlights = data["highlights"] as? [[String: Any]] ?? []
-            print("📚 Found \(highlights.count) existing highlights in document")
             
             switch operation {
             case .addHighlight(let highlight):
                 guard let highlightData = try? JSONEncoder().encode(highlight).toDictionary() else {
-                    print("❌ Failed to encode highlight data")
                     return nil
                 }
                 highlights.append(highlightData)
-                print("📝 Added highlight. Total highlights now: \(highlights.count)")
             case .updateHighlight(let highlight):
                 // Find and update existing highlight
                 guard let highlightData = try? JSONEncoder().encode(highlight).toDictionary() else {
-                    print("❌ Failed to encode highlight data")
                     return nil
                 }
                 for (index, existingHighlight) in highlights.enumerated() {
                     if existingHighlight["id"] as? String == highlight.id {
                         highlights[index] = highlightData
-                        print("✏️ Updated highlight: \(highlight.text.prefix(30))...")
                         break
                     }
                 }
@@ -503,12 +516,10 @@ class UnifiedFirebaseStorage: ObservableObject {
                 highlights.removeAll { highlightDict in
                     highlightDict["id"] as? String == highlightId
                 }
-                print("🗑️ Removed highlight. Count before: \(countBefore), after: \(highlights.count)")
             }
             
             data["highlights"] = highlights
             data["lastModified"] = Timestamp(date: Date())
-            print("💾 Updating document with \(highlights.count) highlights")
             transaction.setData(data, forDocument: docRef)
             
             return nil
@@ -525,18 +536,31 @@ class UnifiedFirebaseStorage: ObservableObject {
         guard !pendingOperations.isEmpty,
               let userId = FirebaseManager.shared.userId else { return }
         
+        // Only process if network is available
+        guard NetworkMonitor.shared.isConnected else {
+            return
+        }
+        
         operationQueue.async { [weak self] in
             guard let self = self else { return }
             
             let operations = self.pendingOperations
             self.pendingOperations.removeAll()
             
+            
             for operation in operations {
-                self.executeOperation(operation, userId: userId) { result in
-                    if case .failure(let error) = result {
-                        print("❌ Failed to execute offline operation: \(error)")
-                        // Re-queue failed operations
-                        self.pendingOperations.append(operation)
+                // Use retry logic for offline operations
+                self.retryOperation(maxAttempts: self.maxRetryAttempts) { attemptCompletion in
+                    self.executeOperation(operation, userId: userId, completion: attemptCompletion)
+                } finalCompletion: { result in
+                    switch result {
+                    case .success:
+                        break
+                    case .failure(let error):
+                        // Re-queue failed operations with exponential backoff
+                        DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 5...15)) {
+                            self.pendingOperations.append(operation)
+                        }
                     }
                 }
             }
@@ -623,47 +647,58 @@ class UnifiedFirebaseStorage: ObservableObject {
             return
         }
         
-        let fileName = "\(title.sanitizedFileName())_\(UUID().uuidString.prefix(8)).pdf"
-        let storageRef = Storage.storage().reference().child("books/\(userId)/\(fileName)")
-        
-        // Upload file
-        storageRef.putFile(from: fileURL, metadata: nil) { [weak self] metadata, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            
-            // Get download URL
-            storageRef.downloadURL { [weak self] url, error in
-                if let error = error {
-                    completion(.failure(error))
-                    return
-                }
-                
-                guard let downloadURL = url else {
-                    completion(.failure(StorageError.networkUnavailable))
-                    return
-                }
-                
+        retryOperation(maxAttempts: maxRetryAttempts) { [weak self] attemptCompletion in
+            self?.performUploadAttempt(fileURL: fileURL, title: title, author: author, userId: userId, completion: attemptCompletion)
+        } finalCompletion: { result in
+            completion(result)
+        }
+    }
+    
+    private func performUploadAttempt(
+        fileURL: URL,
+        title: String,
+        author: String,
+        userId: String,
+        completion: @escaping (Result<Book, Error>) -> Void
+    ) {
+        // Use the new upload helper for more robust uploads
+        FirebaseUploadHelper.shared.uploadPDF(
+            fileURL: fileURL,
+            title: title,
+            author: author,
+            userId: userId
+        ) { [weak self] result in
+            switch result {
+            case .success(let uploadResult):
                 // Create book object
                 let book = Book(
                     title: title,
                     author: author,
-                    filePath: downloadURL.absoluteString,
+                    filePath: uploadResult.url,
                     type: .pdf
                 )
                 
-                // Save to Firestore
-                self?.addBook(book) { result in
-                    completion(result.map { _ in book })
+                // Save to Firestore with retry
+                self?.addBookWithRetry(book) { saveResult in
+                    switch saveResult {
+                    case .success:
+                        completion(.success(book))
+                    case .failure(let error):
+                        // If metadata save fails, try to delete uploaded file
+                        let storageRef = Storage.storage().reference().child("books/\(userId)/\(uploadResult.fileName)")
+                        storageRef.delete { _ in }
+                        completion(.failure(error))
+                    }
                 }
+                
+            case .failure(let error):
+                completion(.failure(error))
             }
         }
     }
     
     func downloadBook(_ book: Book, completion: @escaping (Result<URL, Error>) -> Void) {
-        guard !book.filePath.isEmpty,
-              let fileURL = URL(string: book.filePath) else {
+        guard !book.filePath.isEmpty else {
             completion(.failure(StorageError.networkUnavailable))
             return
         }
@@ -675,14 +710,13 @@ class UnifiedFirebaseStorage: ObservableObject {
             return
         }
         
-        // Download from Firebase Storage
-        let storageRef = Storage.storage().reference(forURL: book.filePath)
-        storageRef.write(toFile: localURL) { url, error in
-            if let error = error {
-                completion(.failure(error))
-            } else if let url = url {
-                completion(.success(url))
-            }
+        // Use robust download helper
+        FirebaseDownloadHelper.shared.downloadFile(
+            from: book.filePath,
+            to: localURL,
+            maxRetries: 3
+        ) { result in
+            completion(result)
         }
     }
     
@@ -736,11 +770,9 @@ class UnifiedFirebaseStorage: ObservableObject {
                 case .success:
                     uploadedCount += 1
                     successfulMigrations += 1
-                    print("✅ Migrated book: \(book.title)")
                 case .failure(let error):
                     errors.append(error)
                     uploadedCount += 1
-                    print("❌ Failed to migrate book: \(book.title) - \(error)")
                 }
                 checkMigrationComplete()
             }
@@ -786,17 +818,14 @@ class UnifiedFirebaseStorage: ObservableObject {
                 // Check if book is broken (empty file path or invalid URL)
                 if filePath.isEmpty || (!filePath.starts(with: "https://") && !FileManager.default.fileExists(atPath: filePath)) {
                     brokenBooks.append(document.documentID)
-                    print("🗑️ Found broken book: \(data["title"] as? String ?? "Unknown") - Empty or invalid file path")
                 }
             }
             
             if brokenBooks.isEmpty {
-                print("✅ No broken books found")
                 completion(.success(0))
                 return
             }
             
-            print("🗑️ Found \(brokenBooks.count) broken books to remove")
             self?.deleteBrokenBooks(bookIds: brokenBooks, completion: completion)
         }
     }
@@ -817,10 +846,8 @@ class UnifiedFirebaseStorage: ObservableObject {
         
         batch.commit { error in
             if let error = error {
-                print("❌ Failed to delete broken books: \(error)")
                 completion(.failure(error))
             } else {
-                print("✅ Successfully deleted \(bookIds.count) broken books")
                 completion(.success(bookIds.count))
             }
         }
@@ -834,20 +861,183 @@ class UnifiedFirebaseStorage: ObservableObject {
         
         let docRef = db.collection("users").document(userId).collection("books").document(bookId)
         
-        docRef.delete { error in
+        // First get the book data to find the storage file
+        docRef.getDocument { [weak self] document, error in
             if let error = error {
                 completion(.failure(error))
-            } else {
-                print("✅ Successfully removed book: \(bookId)")
-                completion(.success(()))
+                return
+            }
+            
+            // Delete from Firestore first
+            docRef.delete { error in
+                if let error = error {
+                    completion(.failure(error))
+                    return
+                }
+                
+                // If Firestore deletion succeeded, try to delete from Storage
+                if let document = document, document.exists,
+                   let data = document.data(),
+                   let fileName = data["fileName"] as? String {
+                    
+                    let storageRef = Storage.storage().reference()
+                    let fileRef = storageRef.child("users/\(userId)/books/\(fileName)")
+                    
+                    fileRef.delete { storageError in
+                        if let storageError = storageError {
+                            // Log storage deletion error but don't fail the operation
+                            // since Firestore deletion already succeeded
+                            print("Failed to delete file from Storage: \(storageError.localizedDescription)")
+                        } else {
+                            print("Successfully deleted file from Storage: \(fileName)")
+                        }
+                        
+                        // Complete successfully regardless of storage deletion result
+                        completion(.success(()))
+                    }
+                } else {
+                    // No storage file to delete or couldn't find it
+                    completion(.success(()))
+                }
             }
         }
+    }
+    
+    // MARK: - Retry Logic
+    
+    private func retryOperation<T>(
+        maxAttempts: Int,
+        attempt: @escaping (@escaping (Result<T, Error>) -> Void) -> Void,
+        finalCompletion: @escaping (Result<T, Error>) -> Void
+    ) {
+        func performAttempt(attemptNumber: Int) {
+            attempt { result in
+                switch result {
+                case .success(let value):
+                    finalCompletion(.success(value))
+                case .failure(let error):
+                    if attemptNumber < maxAttempts && self.shouldRetry(error: error) {
+                        DispatchQueue.global().asyncAfter(deadline: .now() + self.retryDelay * Double(attemptNumber)) {
+                            performAttempt(attemptNumber: attemptNumber + 1)
+                        }
+                    } else {
+                        finalCompletion(.failure(error))
+                    }
+                }
+            }
+        }
+        
+        performAttempt(attemptNumber: 1)
+    }
+    
+    private func shouldRetry(error: Error) -> Bool {
+        // Check if error is retryable
+        if let nsError = error as NSError? {
+            // Network errors
+            if nsError.domain == NSURLErrorDomain {
+                switch nsError.code {
+                case NSURLErrorTimedOut,
+                     NSURLErrorCannotConnectToHost,
+                     NSURLErrorNetworkConnectionLost,
+                     NSURLErrorNotConnectedToInternet:
+                    return true
+                default:
+                    return false
+                }
+            }
+            
+            // Firebase errors
+            if nsError.domain.contains("FIRStorage") {
+                switch nsError.code {
+                case 408, // Request timeout
+                     429, // Too many requests
+                     503, // Service unavailable
+                     504: // Gateway timeout
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
+        
+        return false
+    }
+    
+    private func addBookWithRetry(_ book: Book, completion: @escaping (Result<Void, Error>) -> Void) {
+        retryOperation(maxAttempts: maxRetryAttempts) { [weak self] attemptCompletion in
+            self?.addBook(book, completion: attemptCompletion)
+        } finalCompletion: { result in
+            completion(result)
+        }
+    }
+    
+    // MARK: - Enhanced Conflict Resolution
+    
+    private func resolveConflict(local: [String: Any], remote: [String: Any]) -> [String: Any] {
+        var resolved = remote
+        
+        // Use latest timestamp for basic fields
+        let localTimestamp = (local["lastModified"] as? Timestamp)?.dateValue() ?? Date.distantPast
+        let remoteTimestamp = (remote["lastModified"] as? Timestamp)?.dateValue() ?? Date.distantPast
+        
+        if localTimestamp > remoteTimestamp {
+            // Local is newer, use local version for basic fields
+            resolved["lastReadPosition"] = local["lastReadPosition"]
+            resolved["lastModified"] = local["lastModified"]
+            resolved["personalSummary"] = local["personalSummary"]
+            resolved["keyTakeaways"] = local["keyTakeaways"]
+            resolved["actionItems"] = local["actionItems"]
+            resolved["notesUpdatedAt"] = local["notesUpdatedAt"]
+        }
+
+        // Merge arrays (bookmarks, highlights) by combining unique items
+        resolved["bookmarks"] = mergeUniqueArrays(
+            local: local["bookmarks"] as? [[String: Any]] ?? [],
+            remote: remote["bookmarks"] as? [[String: Any]] ?? []
+        )
+        
+        resolved["highlights"] = mergeUniqueArrays(
+            local: local["highlights"] as? [[String: Any]] ?? [],
+            remote: remote["highlights"] as? [[String: Any]] ?? []
+        )
+
+        resolved["notes"] = mergeUniqueArrays(
+            local: local["notes"] as? [[String: Any]] ?? [],
+            remote: remote["notes"] as? [[String: Any]] ?? []
+        )
+
+        resolved["sessionNotes"] = mergeUniqueArrays(
+            local: local["sessionNotes"] as? [[String: Any]] ?? [],
+            remote: remote["sessionNotes"] as? [[String: Any]] ?? []
+        )
+
+        return resolved
+    }
+    
+    private func mergeUniqueArrays(local: [[String: Any]], remote: [[String: Any]]) -> [[String: Any]] {
+        var merged = remote
+        
+        for localItem in local {
+            if let id = localItem["id"] as? String {
+                // Check if item already exists in remote
+                let existsInRemote = remote.contains { remoteItem in
+                    remoteItem["id"] as? String == id
+                }
+                
+                if !existsInRemote {
+                    merged.append(localItem)
+                }
+            }
+        }
+        
+        return merged
     }
     
     // MARK: - Cleanup
     deinit {
         stopListening()
         cancellables.removeAll()
+        networkCancellable?.cancel()
     }
 }
 
@@ -880,6 +1070,8 @@ enum StorageError: LocalizedError {
     case networkUnavailable
     case conflictResolutionFailed
     case rateLimitExceeded
+    case fileTooLarge
+    case invalidFileName
     
     var errorDescription: String? {
         switch self {
@@ -891,6 +1083,10 @@ enum StorageError: LocalizedError {
             return "Failed to resolve data conflict"
         case .rateLimitExceeded:
             return "Too many requests. Please wait a moment and try again"
+        case .fileTooLarge:
+            return "File is too large. Maximum size is 100MB."
+        case .invalidFileName:
+            return "File name contains invalid characters."
         }
     }
 }
@@ -906,14 +1102,6 @@ extension Encodable {
     func toDictionary() -> [String: Any]? {
         guard let data = try? JSONEncoder().encode(self) else { return nil }
         return data.toDictionary()
-    }
-}
-
-// Simple reachability check
-class Reachability {
-    static func isConnectedToNetwork() -> Bool {
-        // Simplified network check - in production use proper reachability framework
-        return true
     }
 }
 

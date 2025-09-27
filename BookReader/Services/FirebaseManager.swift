@@ -76,18 +76,14 @@ class FirebaseManager: ObservableObject {
         // Set initial user state
         currentUser = auth.currentUser
         if let user = currentUser {
-            print("🔐 Initial user state: \(user.uid)")
         }
         
         // Add auth state listener
         auth.addStateDidChangeListener { [weak self] (auth, user) in
-            print("🔄 Auth state changed: \(user?.uid ?? "nil")")
             self?.currentUser = user
             if let user = user {
-                print("🔐 User authenticated: \(user.uid)")
                 self?.updateUserProfile()
             } else {
-                print("🔓 User not authenticated")
             }
         }
     }
@@ -110,9 +106,7 @@ class FirebaseManager: ObservableObject {
         // Merge to avoid overwriting existing data
         userRef.setData(profileData, merge: true) { error in
             if let error = error {
-                print("❌ Error updating user profile: \(error)")
             } else {
-                print("✅ User profile updated")
             }
         }
     }

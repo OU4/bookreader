@@ -31,10 +31,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         
         // Check authentication state and show appropriate view
         let currentUser = Auth.auth().currentUser
-        print("🔍 Current user on launch: \(currentUser?.uid ?? "none")")
         
         if let user = currentUser {
-            print("✅ User is authenticated: \(user.uid)")
             // User is signed in, show library
             let libraryVC = ModernLibraryViewController()
             let navigationController = UINavigationController(rootViewController: libraryVC)
@@ -43,7 +41,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             // Check if migration is needed
             checkForMigration()
         } else {
-            print("❌ No user authenticated, showing login")
             // No user signed in, show auth screen
             let loginVC = LoginViewController()
             let navigationController = UINavigationController(rootViewController: loginVC)

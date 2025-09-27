@@ -23,9 +23,14 @@ struct Book: Codable {
     var highlights: [Highlight] = []
     var notes: [Note] = []
     var readingStats: ReadingStats = ReadingStats()
-    
+    var personalSummary: String = ""
+    var keyTakeaways: String = ""
+    var actionItems: String = ""
+    var sessionNotes: [BookSessionNote] = []
+    var notesUpdatedAt: Date?
+
     enum CodingKeys: String, CodingKey {
-        case id, title, author, filePath, type, lastReadPosition, bookmarks, highlights, notes, readingStats
+        case id, title, author, filePath, type, lastReadPosition, bookmarks, highlights, notes, readingStats, personalSummary, keyTakeaways, actionItems, sessionNotes, notesUpdatedAt
         // Exclude coverImage from Codable
     }
     
@@ -41,6 +46,16 @@ struct Book: Codable {
         highlights = try container.decodeIfPresent([Highlight].self, forKey: .highlights) ?? []
         notes = try container.decodeIfPresent([Note].self, forKey: .notes) ?? []
         readingStats = try container.decodeIfPresent(ReadingStats.self, forKey: .readingStats) ?? ReadingStats()
+        personalSummary = try container.decodeIfPresent(String.self, forKey: .personalSummary) ?? ""
+        keyTakeaways = try container.decodeIfPresent(String.self, forKey: .keyTakeaways) ?? ""
+        actionItems = try container.decodeIfPresent(String.self, forKey: .actionItems) ?? ""
+        sessionNotes = try container.decodeIfPresent([BookSessionNote].self, forKey: .sessionNotes) ?? []
+        if let notesUpdatedString = try container.decodeIfPresent(String.self, forKey: .notesUpdatedAt) {
+            let formatter = ISO8601DateFormatter()
+            notesUpdatedAt = formatter.date(from: notesUpdatedString)
+        } else {
+            notesUpdatedAt = nil
+        }
         // coverImage is set to nil since it's not stored in Codable
         coverImage = nil
     }
@@ -57,6 +72,14 @@ struct Book: Codable {
         try container.encode(highlights, forKey: .highlights)
         try container.encode(notes, forKey: .notes)
         try container.encode(readingStats, forKey: .readingStats)
+        try container.encode(personalSummary, forKey: .personalSummary)
+        try container.encode(keyTakeaways, forKey: .keyTakeaways)
+        try container.encode(actionItems, forKey: .actionItems)
+        try container.encode(sessionNotes, forKey: .sessionNotes)
+        if let notesUpdatedAt {
+            let formatter = ISO8601DateFormatter()
+            try container.encode(formatter.string(from: notesUpdatedAt), forKey: .notesUpdatedAt)
+        }
         // coverImage is not encoded since UIImage doesn't conform to Codable
     }
     
@@ -70,7 +93,12 @@ struct Book: Codable {
          bookmarks: [Bookmark] = [],
          highlights: [Highlight] = [],
          notes: [Note] = [],
-         readingStats: ReadingStats = ReadingStats()) {
+         readingStats: ReadingStats = ReadingStats(),
+         personalSummary: String = "",
+         keyTakeaways: String = "",
+         actionItems: String = "",
+         sessionNotes: [BookSessionNote] = [],
+         notesUpdatedAt: Date? = nil) {
         self.id = id
         self.title = title
         self.author = author
@@ -82,6 +110,75 @@ struct Book: Codable {
         self.highlights = highlights
         self.notes = notes
         self.readingStats = readingStats
+        self.personalSummary = personalSummary
+        self.keyTakeaways = keyTakeaways
+        self.actionItems = actionItems
+        self.sessionNotes = sessionNotes
+        self.notesUpdatedAt = notesUpdatedAt
+    }
+}
+
+struct BookSessionNote: Codable, Identifiable {
+    let id: String
+    var text: String
+    var tags: [String]
+    var pageHint: Int?
+    var createdAt: Date
+    var updatedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case id, text, tags, pageHint, createdAt, updatedAt
+    }
+
+    init(id: String = UUID().uuidString,
+         text: String,
+         tags: [String] = [],
+         pageHint: Int? = nil,
+         createdAt: Date = Date(),
+         updatedAt: Date = Date()) {
+        self.id = id
+        self.text = text
+        self.tags = tags
+        self.pageHint = pageHint
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+        pageHint = try container.decodeIfPresent(Int.self, forKey: .pageHint)
+
+        let formatter = ISO8601DateFormatter()
+        if let createdString = try container.decodeIfPresent(String.self, forKey: .createdAt) {
+            createdAt = formatter.date(from: createdString) ?? Date()
+        } else if let createdDate = try container.decodeIfPresent(Date.self, forKey: .createdAt) {
+            createdAt = createdDate
+        } else {
+            createdAt = Date()
+        }
+
+        if let updatedString = try container.decodeIfPresent(String.self, forKey: .updatedAt) {
+            updatedAt = formatter.date(from: updatedString) ?? createdAt
+        } else if let updatedDate = try container.decodeIfPresent(Date.self, forKey: .updatedAt) {
+            updatedAt = updatedDate
+        } else {
+            updatedAt = createdAt
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encode(tags, forKey: .tags)
+        try container.encodeIfPresent(pageHint, forKey: .pageHint)
+
+        let formatter = ISO8601DateFormatter()
+        try container.encode(formatter.string(from: createdAt), forKey: .createdAt)
+        try container.encode(formatter.string(from: updatedAt), forKey: .updatedAt)
     }
 }
 
@@ -159,11 +256,12 @@ struct Highlight: Codable {
     let text: String
     let color: HighlightColor
     let position: TextPosition
+    let selectionRects: [SelectionRect]?
     let dateCreated: Date
     var note: String?
     
     enum CodingKeys: String, CodingKey {
-        case id, text, color, position, dateCreated, note
+        case id, text, color, position, selectionRects, dateCreated, note
     }
     
     init(from decoder: Decoder) throws {
@@ -172,6 +270,7 @@ struct Highlight: Codable {
         text = try container.decode(String.self, forKey: .text)
         color = try container.decode(HighlightColor.self, forKey: .color)
         position = try container.decode(TextPosition.self, forKey: .position)
+        selectionRects = try container.decodeIfPresent([SelectionRect].self, forKey: .selectionRects)
         note = try container.decodeIfPresent(String.self, forKey: .note)
         
         // Handle date string conversion
@@ -189,6 +288,7 @@ struct Highlight: Codable {
         try container.encode(text, forKey: .text)
         try container.encode(color, forKey: .color)
         try container.encode(position, forKey: .position)
+        try container.encodeIfPresent(selectionRects, forKey: .selectionRects)
         try container.encodeIfPresent(note, forKey: .note)
         
         // Convert date to string
@@ -201,13 +301,35 @@ struct Highlight: Codable {
          color: HighlightColor,
          position: TextPosition,
          note: String? = nil,
+         selectionRects: [SelectionRect]? = nil,
          dateCreated: Date = Date()) {
         self.id = id
         self.text = text
         self.color = color
         self.position = position
         self.note = note
+        self.selectionRects = selectionRects
         self.dateCreated = dateCreated
+    }
+}
+
+struct SelectionRect: Codable {
+    let pageIndex: Int
+    let x: CGFloat
+    let y: CGFloat
+    let width: CGFloat
+    let height: CGFloat
+    
+    init(pageIndex: Int, rect: CGRect) {
+        self.pageIndex = pageIndex
+        self.x = rect.origin.x
+        self.y = rect.origin.y
+        self.width = rect.width
+        self.height = rect.height
+    }
+    
+    var cgRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: height)
     }
 }
 

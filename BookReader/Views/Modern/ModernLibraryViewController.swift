@@ -18,18 +18,38 @@ class ModernLibraryViewController: UIViewController {
     private var currentSearchText = ""
     private var cancellables = Set<AnyCancellable>()
     
+    // Debouncing for stats refresh
+    private var statsRefreshWorkItem: DispatchWorkItem?
+    
+    // Sorting and filtering
+    private var currentSortType: SortType = .recent
+    private var currentFilterType: FilterType = .all
+    
+    // Loading indicator properties
+    private var loadingIndicator: UIView?
+    private var loadingLabel: UILabel?
+    
+    enum SortType {
+        case title, author, recent, progress
+    }
+    
+    enum FilterType {
+        case all, reading, completed
+    }
+    
     // MARK: - UI Components
     private lazy var gradientBackgroundLayer: CAGradientLayer = {
         let gradient = CAGradientLayer()
         gradient.colors = [
             UIColor.systemBackground.cgColor,
-            UIColor.systemBlue.withAlphaComponent(0.05).cgColor,
-            UIColor.systemPurple.withAlphaComponent(0.05).cgColor
+            UIColor.systemBlue.withAlphaComponent(0.03).cgColor,
+            UIColor.systemPurple.withAlphaComponent(0.03).cgColor,
+            UIColor.systemBackground.cgColor
         ]
-        gradient.locations = [0, 0.5, 1]
-        gradient.type = .radial
-        gradient.startPoint = CGPoint(x: 0.5, y: 0)
-        gradient.endPoint = CGPoint(x: 0.5, y: 1)
+        gradient.locations = [0, 0.3, 0.7, 1]
+        gradient.type = .axial
+        gradient.startPoint = CGPoint(x: 0, y: 0)
+        gradient.endPoint = CGPoint(x: 1, y: 1)
         return gradient
     }()
     
@@ -40,32 +60,75 @@ class ModernLibraryViewController: UIViewController {
         return view
     }()
     
+    private lazy var headerBackgroundView: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.9)
+        view.layer.cornerRadius = 24
+        view.layer.shadowColor = UIColor.black.cgColor
+        view.layer.shadowOffset = CGSize(width: 0, height: 4)
+        view.layer.shadowRadius = 16
+        view.layer.shadowOpacity = 0.08
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+    
+    private lazy var quickActionsButton: UIButton = {
+        let button = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        button.setImage(UIImage(systemName: "line.3.horizontal.circle.fill", withConfiguration: config), for: .normal)
+        button.tintColor = .systemBlue
+        button.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.1)
+        button.layer.cornerRadius = 18
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.addTarget(self, action: #selector(showQuickActions), for: .touchUpInside)
+        return button
+    }()
+    
+    private lazy var profileButton: UIButton = {
+        let button = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        button.setImage(UIImage(systemName: "person.circle.fill", withConfiguration: config), for: .normal)
+        button.tintColor = .systemPurple
+        button.backgroundColor = UIColor.systemPurple.withAlphaComponent(0.1)
+        button.layer.cornerRadius = 18
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.addTarget(self, action: #selector(userMenuTapped), for: .touchUpInside)
+        return button
+    }()
+    
     private lazy var titleLabel: UILabel = {
         let label = UILabel()
-        label.text = "My Library"
-        label.font = UIFont.systemFont(ofSize: 32, weight: .bold)
+        label.text = getDynamicGreeting()
+        label.font = UIFont.systemFont(ofSize: 24, weight: .semibold)
         label.textColor = .label
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.8
+        label.numberOfLines = 1
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
     
     private lazy var subtitleLabel: UILabel = {
         let label = UILabel()
-        label.text = "Your reading journey continues"
-        label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+        label.text = getDynamicSubtitle()
+        label.font = UIFont.systemFont(ofSize: 14, weight: .regular)
         label.textColor = .secondaryLabel
+        label.numberOfLines = 2
+        label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }()
     
     private lazy var searchContainer: UIView = {
         let view = UIView()
-        view.backgroundColor = UIColor.systemBackground
-        view.layer.cornerRadius = 20
+        view.backgroundColor = UIColor.secondarySystemBackground
+        view.layer.cornerRadius = 16
         view.layer.shadowColor = UIColor.black.cgColor
-        view.layer.shadowOffset = CGSize(width: 0.0, height: 2.0)
-        view.layer.shadowRadius = 8
-        view.layer.shadowOpacity = 0.1
+        view.layer.shadowOffset = CGSize(width: 0, height: 2)
+        view.layer.shadowRadius = 6
+        view.layer.shadowOpacity = 0.06
+        view.layer.borderWidth = 1
+        view.layer.borderColor = UIColor.separator.withAlphaComponent(0.2).cgColor
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
@@ -136,7 +199,6 @@ class ModernLibraryViewController: UIViewController {
     // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
-        print("DEBUG: ModernLibraryViewController viewDidLoad called")
         setupUI()
         setupObservers()
         
@@ -147,14 +209,13 @@ class ModernLibraryViewController: UIViewController {
         addAnimations()
         
         // Verify collection view setup
-        print("DEBUG: collectionView.dataSource = \(String(describing: collectionView.dataSource))")
-        print("DEBUG: collectionView.delegate = \(String(describing: collectionView.delegate))")
     }
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         navigationController?.setNavigationBarHidden(true, animated: animated)
         refreshStats()
+        animateHeaderEntrance()
     }
     
     override func viewDidLayoutSubviews() {
@@ -175,8 +236,11 @@ class ModernLibraryViewController: UIViewController {
         view.addSubview(emptyStateView)
         view.addSubview(addBookButton)
         
+        headerView.addSubview(headerBackgroundView)
         headerView.addSubview(titleLabel)
         headerView.addSubview(subtitleLabel)
+        headerView.addSubview(quickActionsButton)
+        headerView.addSubview(profileButton)
         searchContainer.addSubview(searchBar)
         
         setupConstraints()
@@ -205,24 +269,44 @@ class ModernLibraryViewController: UIViewController {
     private func setupConstraints() {
         NSLayoutConstraint.activate([
             // Header
-            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
-            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             
-            titleLabel.topAnchor.constraint(equalTo: headerView.topAnchor),
-            titleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor),
-            titleLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor),
+            // Header background
+            headerBackgroundView.topAnchor.constraint(equalTo: headerView.topAnchor),
+            headerBackgroundView.leadingAnchor.constraint(equalTo: headerView.leadingAnchor),
+            headerBackgroundView.trailingAnchor.constraint(equalTo: headerView.trailingAnchor),
+            headerBackgroundView.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
             
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            subtitleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor),
-            subtitleLabel.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
+            // Title with padding
+            titleLabel.topAnchor.constraint(equalTo: headerView.topAnchor, constant: 20),
+            titleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: quickActionsButton.leadingAnchor, constant: -12),
+            
+            // Quick actions button
+            quickActionsButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            quickActionsButton.trailingAnchor.constraint(equalTo: profileButton.leadingAnchor, constant: -8),
+            quickActionsButton.widthAnchor.constraint(equalToConstant: 36),
+            quickActionsButton.heightAnchor.constraint(equalToConstant: 36),
+            
+            // Profile button
+            profileButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            profileButton.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -20),
+            profileButton.widthAnchor.constraint(equalToConstant: 36),
+            profileButton.heightAnchor.constraint(equalToConstant: 36),
+            
+            // Subtitle with proper spacing
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            subtitleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 20),
+            subtitleLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -20),
+            subtitleLabel.bottomAnchor.constraint(equalTo: headerView.bottomAnchor, constant: -20),
             
             // Search
-            searchContainer.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 24),
-            searchContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            searchContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            searchContainer.heightAnchor.constraint(equalToConstant: 50),
+            searchContainer.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 16),
+            searchContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            searchContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            searchContainer.heightAnchor.constraint(equalToConstant: 52),
             
             searchBar.topAnchor.constraint(equalTo: searchContainer.topAnchor),
             searchBar.leadingAnchor.constraint(equalTo: searchContainer.leadingAnchor, constant: 8),
@@ -230,9 +314,9 @@ class ModernLibraryViewController: UIViewController {
             searchBar.bottomAnchor.constraint(equalTo: searchContainer.bottomAnchor),
             
             // Stats
-            statsView.topAnchor.constraint(equalTo: searchContainer.bottomAnchor, constant: 20),
-            statsView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            statsView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            statsView.topAnchor.constraint(equalTo: searchContainer.bottomAnchor, constant: 16),
+            statsView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            statsView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             
             // Collection view
             collectionView.topAnchor.constraint(equalTo: statsView.bottomAnchor, constant: 20),
@@ -259,11 +343,9 @@ class ModernLibraryViewController: UIViewController {
         UnifiedFirebaseStorage.shared.$books
             .receive(on: DispatchQueue.main)
             .sink { [weak self] books in
-                print("📚 Firebase books updated: \(books.count) books")
                 self?.books = books
-                self?.filteredBooks = books
-                self?.updateEmptyState()
-                self?.collectionView.reloadData()
+                self?.updateDynamicContent()
+                self?.applyFiltersAndSort()
                 self?.refreshStats()
             }
             .store(in: &cancellables)
@@ -273,10 +355,8 @@ class ModernLibraryViewController: UIViewController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] user in
                 if user != nil {
-                    print("🔥 User authenticated, refreshing books")
                     self?.loadBooks()
                 } else {
-                    print("🔥 User signed out, clearing books")
                     self?.books = []
                     self?.filteredBooks = []
                     self?.updateEmptyState()
@@ -409,13 +489,55 @@ class ModernLibraryViewController: UIViewController {
         }
     }
     
+    private func animateHeaderEntrance() {
+        // Prepare for animation
+        headerBackgroundView.alpha = 0
+        headerBackgroundView.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
+        
+        titleLabel.alpha = 0
+        titleLabel.transform = CGAffineTransform(translationX: -20, y: 0)
+        
+        subtitleLabel.alpha = 0
+        subtitleLabel.transform = CGAffineTransform(translationX: -20, y: 0)
+        
+        quickActionsButton.alpha = 0
+        quickActionsButton.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        
+        profileButton.alpha = 0
+        profileButton.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
+        
+        // Animate
+        UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            self.headerBackgroundView.alpha = 1
+            self.headerBackgroundView.transform = .identity
+        }
+        
+        UIView.animate(withDuration: 0.6, delay: 0.1, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            self.titleLabel.alpha = 1
+            self.titleLabel.transform = .identity
+        }
+        
+        UIView.animate(withDuration: 0.6, delay: 0.15, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            self.subtitleLabel.alpha = 1
+            self.subtitleLabel.transform = .identity
+        }
+        
+        UIView.animate(withDuration: 0.5, delay: 0.2, usingSpringWithDamping: 0.7, initialSpringVelocity: 0) {
+            self.quickActionsButton.alpha = 1
+            self.quickActionsButton.transform = .identity
+        }
+        
+        UIView.animate(withDuration: 0.5, delay: 0.25, usingSpringWithDamping: 0.7, initialSpringVelocity: 0) {
+            self.profileButton.alpha = 1
+            self.profileButton.transform = .identity
+        }
+    }
+    
     // MARK: - Data
     private func loadBooks() {
-        print("DEBUG: loadBooks() called")
         
         // Check if user is authenticated
         guard FirebaseManager.shared.isAuthenticated else {
-            print("DEBUG: User not authenticated, using local storage")
             books = BookStorage.shared.loadBooks()
             filteredBooks = books
             updateEmptyState()
@@ -425,15 +547,11 @@ class ModernLibraryViewController: UIViewController {
         
         // Use Firebase storage
         books = UnifiedFirebaseStorage.shared.books
-        print("DEBUG: Loaded \(books.count) books from Firebase")
         for (index, book) in books.enumerated() {
-            print("DEBUG: Book \(index): \(book.title)")
         }
         filteredBooks = books
-        print("DEBUG: filteredBooks count: \(filteredBooks.count)")
         updateEmptyState()
         collectionView.reloadData()
-        print("DEBUG: Collection view reloaded")
         
         // Observe changes
         UnifiedFirebaseStorage.shared.$books
@@ -452,26 +570,39 @@ class ModernLibraryViewController: UIViewController {
     }
     
     private func refreshStats() {
-        let totalBooks = books.count
-        let booksCompleted = books.filter { $0.lastReadPosition >= 1.0 }.count
+        // Cancel previous work item to debounce multiple calls
+        statsRefreshWorkItem?.cancel()
         
-        // Get reading time from UnifiedReadingTracker
-        let stats = UnifiedReadingTracker.shared.getTrackerStats()
-        let totalReadingMinutes = Int(stats.totalReadingTime / 60)
+        // Create new work item
+        statsRefreshWorkItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            
+            let totalBooks = self.books.count
+            let booksCompleted = self.books.filter { $0.lastReadPosition >= 1.0 }.count
+            
+            // Get reading time from UnifiedReadingTracker
+            let stats = UnifiedReadingTracker.shared.getTrackerStats()
+            let totalReadingMinutes = Int(stats.totalReadingTime / 60)
+            let currentStreak = self.calculateReadingStreak()
+            
+            DispatchQueue.main.async {
+                self.statsView.updateStats(
+                    totalBooks: totalBooks,
+                    readingTime: totalReadingMinutes,
+                    completedBooks: booksCompleted,
+                    currentStreak: currentStreak
+                )
+            }
+        }
         
-        statsView.updateStats(
-            totalBooks: totalBooks,
-            readingTime: totalReadingMinutes,
-            completedBooks: booksCompleted
-        )
+        // Execute after a short delay to debounce
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: statsRefreshWorkItem!)
     }
     
     private func updateEmptyState() {
         let isEmpty = filteredBooks.isEmpty
-        print("DEBUG: updateEmptyState - isEmpty: \(isEmpty), filteredBooks count: \(filteredBooks.count)")
         emptyStateView.isHidden = !isEmpty
         collectionView.isHidden = isEmpty
-        print("DEBUG: emptyStateView.isHidden = \(!isEmpty), collectionView.isHidden = \(isEmpty)")
         
         if isEmpty && !currentSearchText.isEmpty {
             emptyStateView.configure(
@@ -504,6 +635,10 @@ class ModernLibraryViewController: UIViewController {
         documentPicker.delegate = self
         documentPicker.allowsMultipleSelection = false
         present(documentPicker, animated: true)
+    }
+    
+    @objc private func userMenuTapped() {
+        showUserMenu()
     }
     
     @objc private func showUserMenu() {
@@ -605,6 +740,184 @@ class ModernLibraryViewController: UIViewController {
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
+    
+    // MARK: - Dynamic Content
+    private func getDynamicGreeting() -> String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let userName = getUserDisplayName()
+        
+        switch hour {
+        case 5..<12:
+            return "Good Morning\(userName.isEmpty ? "" : ", \(userName)")"
+        case 12..<17:
+            return "Good Afternoon\(userName.isEmpty ? "" : ", \(userName)")"
+        case 17..<21:
+            return "Good Evening\(userName.isEmpty ? "" : ", \(userName)")"
+        default:
+            return "Happy Reading\(userName.isEmpty ? "" : ", \(userName)")"
+        }
+    }
+    
+    private func getDynamicSubtitle() -> String {
+        let bookCount = books.count
+        let completedCount = books.filter { $0.lastReadPosition >= 1.0 }.count
+        let readingCount = books.filter { $0.lastReadPosition > 0 && $0.lastReadPosition < 1.0 }.count
+        
+        if bookCount == 0 {
+            return "Start your reading journey by adding your first book"
+        } else if readingCount > 0 {
+            return "You have \(readingCount) book\(readingCount == 1 ? "" : "s") in progress • \(completedCount) completed"
+        } else if completedCount > 0 {
+            return "You've completed \(completedCount) book\(completedCount == 1 ? "" : "s") • Keep the momentum!"
+        } else {
+            return "You have \(bookCount) book\(bookCount == 1 ? "" : "s") ready to explore"
+        }
+    }
+    
+    private func getUserDisplayName() -> String {
+        // Try to get user's first name from Firebase Auth
+        if let user = FirebaseManager.shared.currentUser {
+            if let displayName = user.displayName, !displayName.isEmpty {
+                // Get first name only and limit length
+                let firstName = displayName.components(separatedBy: " ").first ?? displayName
+                // Limit to 15 characters to prevent overflow
+                if firstName.count > 15 {
+                    return String(firstName.prefix(12)) + "..."
+                }
+                return firstName
+            } else if let email = user.email {
+                // Use email username if no display name
+                let username = email.components(separatedBy: "@").first ?? ""
+                if username.count > 15 {
+                    return String(username.prefix(12)) + "..."
+                }
+                return username
+            }
+        }
+        return ""
+    }
+    
+    private func updateDynamicContent() {
+        titleLabel.text = getDynamicGreeting()
+        subtitleLabel.text = getDynamicSubtitle()
+    }
+    
+    @objc private func showQuickActions() {
+        let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        
+        // Sort options
+        alertController.addAction(UIAlertAction(title: "Sort by Title", style: .default) { [weak self] _ in
+            self?.sortBooks(by: .title)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Sort by Author", style: .default) { [weak self] _ in
+            self?.sortBooks(by: .author)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Sort by Recent", style: .default) { [weak self] _ in
+            self?.sortBooks(by: .recent)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Sort by Progress", style: .default) { [weak self] _ in
+            self?.sortBooks(by: .progress)
+        })
+        
+        // Filter options
+        alertController.addAction(UIAlertAction(title: "Show Only Reading", style: .default) { [weak self] _ in
+            self?.filterBooks(by: .reading)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Show Only Completed", style: .default) { [weak self] _ in
+            self?.filterBooks(by: .completed)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Show All Books", style: .default) { [weak self] _ in
+            self?.filterBooks(by: .all)
+        })
+        
+        alertController.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        
+        // For iPad support
+        if let popover = alertController.popoverPresentationController {
+            popover.sourceView = quickActionsButton
+            popover.sourceRect = quickActionsButton.bounds
+        }
+        
+        present(alertController, animated: true)
+    }
+    
+    private func sortBooks(by sortType: SortType) {
+        currentSortType = sortType
+        applyFiltersAndSort()
+    }
+    
+    private func filterBooks(by filterType: FilterType) {
+        currentFilterType = filterType
+        applyFiltersAndSort()
+    }
+    
+    private func applyFiltersAndSort() {
+        var filtered = books
+        
+        // Apply search filter first
+        if !currentSearchText.isEmpty {
+            filtered = filtered.filter { book in
+                book.title.localizedCaseInsensitiveContains(currentSearchText) ||
+                book.author.localizedCaseInsensitiveContains(currentSearchText)
+            }
+        }
+        
+        // Apply status filter
+        switch currentFilterType {
+        case .reading:
+            filtered = filtered.filter { $0.lastReadPosition > 0 && $0.lastReadPosition < 1.0 }
+        case .completed:
+            filtered = filtered.filter { $0.lastReadPosition >= 1.0 }
+        case .all:
+            break
+        }
+        
+        // Apply sorting
+        switch currentSortType {
+        case .title:
+            filtered.sort { (book1: Book, book2: Book) in
+                book1.title.localizedCaseInsensitiveCompare(book2.title) == .orderedAscending
+            }
+        case .author:
+            filtered.sort { (book1: Book, book2: Book) in
+                book1.author.localizedCaseInsensitiveCompare(book2.author) == .orderedAscending
+            }
+        case .recent:
+            filtered.sort { (book1: Book, book2: Book) in
+                let date1 = book1.readingStats.lastReadDate ?? Date.distantPast
+                let date2 = book2.readingStats.lastReadDate ?? Date.distantPast
+                return date1 > date2
+            }
+        case .progress:
+            filtered.sort { (book1: Book, book2: Book) in
+                book1.lastReadPosition > book2.lastReadPosition
+            }
+        }
+        
+        filteredBooks = filtered
+        updateEmptyState()
+        collectionView.reloadData()
+    }
+    
+    private func calculateReadingStreak() -> Int {
+        // Get reading sessions from tracker
+        let stats = UnifiedReadingTracker.shared.getTrackerStats()
+        
+        // Return the current streak from the tracker stats
+        // The UnifiedReadingTracker already calculates and maintains the current streak
+        return stats.currentStreak
+    }
+    
+    // MARK: - Cleanup
+    deinit {
+        statsRefreshWorkItem?.cancel()
+        statsRefreshWorkItem = nil
+    }
 }
 
 // MARK: - UICollectionViewDataSource
@@ -620,7 +933,6 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
         // Section 1: All Books
         let recentlyReadBooks = getRecentlyReadBooks()
         let sections = recentlyReadBooks.isEmpty ? 1 : 2
-        print("DEBUG: numberOfSections = \(sections), filteredBooks.count = \(filteredBooks.count), recentlyRead: \(recentlyReadBooks.count)")
         return sections
     }
     
@@ -633,12 +945,10 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
             // All books section
             count = filteredBooks.count
         }
-        print("DEBUG: numberOfItemsInSection \(section) = \(count)")
         return count
     }
     
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        print("DEBUG: cellForItemAt called for section: \(indexPath.section), item: \(indexPath.item)")
         guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "ModernBookCell", for: indexPath) as? ModernBookCell else {
             fatalError("Failed to dequeue ModernBookCell")
         }
@@ -653,8 +963,8 @@ extension ModernLibraryViewController: UICollectionViewDataSource {
             book = filteredBooks[indexPath.item]
         }
         
-        print("DEBUG: Configuring cell with book: \(book.title)")
         cell.configure(with: book, style: indexPath.section == 0 ? .compact : .detailed)
+        cell.delegate = self
         
         // Add entrance animation for new cells
         cell.alpha = 0
@@ -714,9 +1024,6 @@ extension ModernLibraryViewController: UICollectionViewDelegate {
             book = filteredBooks[indexPath.item]
         }
         
-        print("📖 Selected book: \(book.title)")
-        print("📂 File path: \(book.filePath)")
-        print("📄 File exists: \(FileManager.default.fileExists(atPath: book.filePath))")
         
         // Animate selection
         if let cell = collectionView.cellForItem(at: indexPath) {
@@ -770,20 +1077,9 @@ extension ModernLibraryViewController: UISearchBarDelegate {
     func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
         currentSearchText = searchText
         
-        if searchText.isEmpty {
-            filteredBooks = books
-        } else {
-            filteredBooks = books.filter { book in
-                book.title.localizedCaseInsensitiveContains(searchText) ||
-                book.author.localizedCaseInsensitiveContains(searchText)
-            }
-        }
-        
-        updateEmptyState()
-        
-        // Animate reload
+        // Animate reload with filters and sorting applied
         UIView.transition(with: collectionView, duration: 0.3, options: .transitionCrossDissolve) {
-            self.collectionView.reloadData()
+            self.applyFiltersAndSort()
         }
     }
     
@@ -797,190 +1093,257 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
     
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { 
-            print("❌ No URL selected")
             return 
         }
         
-        print("📁 Selected file: \(url)")
-        print("📁 File exists at source: \(FileManager.default.fileExists(atPath: url.path))")
-        
         // Start accessing the security-scoped resource
         guard url.startAccessingSecurityScopedResource() else {
-            print("❌ Failed to access security-scoped resource")
+            showAlert(title: "Error", message: "Could not access selected file")
             return
         }
         
-        // Verify file is accessible
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            print("❌ File does not exist at path: \(url.path)")
-            url.stopAccessingSecurityScopedResource()
-            return
-        }
+        // Show loading indicator immediately
+        showLoadingIndicator(message: "Processing file...")
         
-        // Copy file to documents directory first
-        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            print("❌ Could not access documents directory")
-            url.stopAccessingSecurityScopedResource()
-            showAlert(title: "Error", message: "Could not access documents directory")
-            return
-        }
-        // Validate file before processing
-        switch SecurityValidator.validateFileUpload(at: url) {
-        case .failure(let error):
-            print("❌ File validation failed: \(error.localizedDescription)")
-            url.stopAccessingSecurityScopedResource()
-            showAlert(title: "Invalid File", message: error.localizedDescription)
-            return
-        case .success:
-            print("✅ File validation passed")
-        }
-        
-        // Sanitize file name to prevent security issues
-        let originalFileName = url.lastPathComponent
-        let sanitizedFileName = SecurityValidator.sanitizeFileName(originalFileName)
-        let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
-        
-        print("📁 Original file name: \(originalFileName)")
-        print("📁 Sanitized file name: \(sanitizedFileName)")
-        print("📁 Destination: \(destinationURL)")
-        print("📁 Documents directory: \(documentsPath)")
-        
-        do {
-            // Remove existing file if it exists
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                print("🗑️ Removing existing file at destination")
-                try FileManager.default.removeItem(at: destinationURL)
-            }
+        // Move all file operations to background queue to prevent UI freeze
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { url.stopAccessingSecurityScopedResource() }
             
-            // Copy file to app's documents directory
-            print("📋 Copying file...")
-            try FileManager.default.copyItem(at: url, to: destinationURL)
-            print("✅ File copied successfully")
+            guard let self = self else { return }
             
-            // Verify the copy was successful
-            guard FileManager.default.fileExists(atPath: destinationURL.path) else {
-                print("❌ File was not copied successfully")
-                url.stopAccessingSecurityScopedResource()
+            // Verify file is accessible
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                DispatchQueue.main.async {
+                    self.hideLoadingIndicator()
+                    self.showAlert(title: "Error", message: "Selected file is not accessible")
+                }
                 return
             }
             
-            // Determine book type based on extension
-            let fileExtension = url.pathExtension.lowercased()
-            let bookType: Book.BookType = {
-                switch fileExtension {
-                case "pdf": return .pdf
-                case "txt": return .text
-                case "epub": return .epub
-                default: return .pdf
+            // Get documents directory
+            guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                DispatchQueue.main.async {
+                    self.hideLoadingIndicator()
+                    self.showAlert(title: "Error", message: "Could not access documents directory")
                 }
-            }()
+                return
+            }
             
-            // Validate file content based on type
-            switch bookType {
-            case .pdf:
-                if !SecurityValidator.validatePDFContent(at: destinationURL) {
-                    print("❌ Invalid PDF content")
-                    try? FileManager.default.removeItem(at: destinationURL)
-                    url.stopAccessingSecurityScopedResource()
-                    showAlert(title: "Invalid File", message: "The PDF file appears to be corrupted")
-                    return
+            // Validate file before processing (now on background thread)
+            switch SecurityValidator.validateFileUpload(at: url) {
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    self.hideLoadingIndicator()
+                    self.showAlert(title: "Invalid File", message: error.localizedDescription)
                 }
-            case .text:
-                if !SecurityValidator.validateTextContent(at: destinationURL) {
-                    print("❌ Invalid text content")
-                    try? FileManager.default.removeItem(at: destinationURL)
-                    url.stopAccessingSecurityScopedResource()
-                    showAlert(title: "Invalid File", message: "The text file could not be read")
-                    return
-                }
-            default:
+                return
+            case .success:
                 break
             }
             
-            // Create new book with the copied file path
-            let book = Book(
-                title: url.deletingPathExtension().lastPathComponent,
-                author: "Unknown Author",
-                filePath: destinationURL.path, // Use copied file path
-                type: bookType
-            )
+            // Sanitize file name to prevent security issues
+            let originalFileName = url.lastPathComponent
+            let sanitizedFileName = SecurityValidator.sanitizeFileName(originalFileName)
+            let destinationURL = documentsPath.appendingPathComponent(sanitizedFileName)
             
-            // Now we can release the security scope since we have the file copied
-            url.stopAccessingSecurityScopedResource()
-            
-            // Debug authentication state
-            print("🔍 Authentication check:")
-            print("   - FirebaseManager.shared.isAuthenticated: \(FirebaseManager.shared.isAuthenticated)")
-            print("   - FirebaseManager.shared.currentUser: \(FirebaseManager.shared.currentUser?.uid ?? "nil")")
-            print("   - Auth.auth().currentUser: \(Auth.auth().currentUser?.uid ?? "nil")")
-            
-            // Verify authentication before sensitive operations
-            guard SecurityValidator.requireAuthentication() else {
-                print("❌ User not authenticated! Cannot save to Firebase")
-                showAlert(title: "Authentication Required", message: "Please sign in to upload books")
-                return
-            }
-            
-            // Verify user has permission for upload operation
-            guard SecurityValidator.validateUserPermission(for: "upload_book") else {
-                print("❌ User lacks permission to upload books")
-                showAlert(title: "Permission Denied", message: "You don't have permission to upload books")
-                return
-            }
-            
-            // Save book IMMEDIATELY while we have access to the file
-            if FirebaseManager.shared.isAuthenticated {
-                print("🚀 Attempting to save to Firebase...")
+            // Continue with file operations on background thread
+            do {
+                // Remove existing file if it exists
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try FileManager.default.removeItem(at: destinationURL)
+                }
                 
-                // Double-check file exists before upload
-                print("🔍 Final file check before Firebase:")
-                print("   - File exists: \(FileManager.default.fileExists(atPath: destinationURL.path))")
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64) ?? 0
-                print("   - File size: \(fileSize) bytes")
+                // Copy file to app's documents directory
+                try FileManager.default.copyItem(at: url, to: destinationURL)
                 
-                if fileSize == 0 {
-                    print("❌ File is empty after copy!")
-                    let alert = UIAlertController(title: "File Error", message: "The copied file is empty", preferredStyle: .alert)
-                    alert.addAction(UIAlertAction(title: "OK", style: .default))
-                    present(alert, animated: true)
+                // Verify the copy was successful
+                guard FileManager.default.fileExists(atPath: destinationURL.path) else {
+                    DispatchQueue.main.async {
+                        self.hideLoadingIndicator()
+                        self.showAlert(title: "Error", message: "Failed to copy file to app directory")
+                    }
                     return
                 }
                 
-                // Create a strong reference to prevent cleanup
-                let fileURLCopy = destinationURL
-                let bookCopy = book
+                // Determine book type based on extension
+                let fileExtension = url.pathExtension.lowercased()
+                let bookType: Book.BookType = {
+                    switch fileExtension {
+                    case "pdf": return .pdf
+                    case "txt": return .text
+                    case "epub": return .epub
+                    default: return .pdf
+                    }
+                }()
                 
-                // Use the copied file for Firebase upload
-                UnifiedFirebaseStorage.shared.uploadBook(fileURL: fileURLCopy, title: bookCopy.title, author: bookCopy.author) { [weak self] result in
+                // Validate file content based on type
+                switch bookType {
+                case .pdf:
+                    if !SecurityValidator.validatePDFContent(at: destinationURL) {
+                        try? FileManager.default.removeItem(at: destinationURL)
+                        DispatchQueue.main.async {
+                            self.hideLoadingIndicator()
+                            self.showAlert(title: "Invalid File", message: "The PDF file appears to be corrupted")
+                        }
+                        return
+                    }
+                case .text:
+                    if !SecurityValidator.validateTextContent(at: destinationURL) {
+                        try? FileManager.default.removeItem(at: destinationURL)
+                        DispatchQueue.main.async {
+                            self.hideLoadingIndicator()
+                            self.showAlert(title: "Invalid File", message: "The text file could not be read")
+                        }
+                        return
+                    }
+                default:
+                    break
+                }
+                
+                // Verify authentication before sensitive operations
+                guard SecurityValidator.requireAuthentication() else {
                     DispatchQueue.main.async {
-                        switch result {
-                        case .success(let uploadedBook):
-                            print("✅ Book uploaded successfully with ID: \(uploadedBook.id)")
-                            // Show success animation
-                            self?.showBookAddedAnimation()
-                        case .failure(let error):
-                            print("❌ Failed to save book to Firebase: \(error)")
-                            // Show error alert
-                            let alert = UIAlertController(title: "Upload Failed", message: error.localizedDescription, preferredStyle: .alert)
-                            alert.addAction(UIAlertAction(title: "OK", style: .default))
-                            self?.present(alert, animated: true)
+                        self.hideLoadingIndicator()
+                        self.showAlert(title: "Authentication Required", message: "Please sign in to upload books")
+                    }
+                    return
+                }
+                
+                // Verify user has permission for upload operation
+                guard SecurityValidator.validateUserPermission(for: "upload_book") else {
+                    DispatchQueue.main.async {
+                        self.hideLoadingIndicator()
+                        self.showAlert(title: "Permission Denied", message: "You don't have permission to upload books")
+                    }
+                    return
+                }
+                
+                // Create new book with the copied file path
+                let book = Book(
+                    title: url.deletingPathExtension().lastPathComponent,
+                    author: "Unknown Author",
+                    filePath: destinationURL.path, // Use copied file path
+                    type: bookType
+                )
+                
+                // Update loading message for upload phase
+                DispatchQueue.main.async {
+                    self.updateLoadingIndicator(message: "Uploading to cloud...")
+                }
+                
+                // Save book IMMEDIATELY while we have access to the file
+                if FirebaseManager.shared.isAuthenticated {
+                    
+                    // Double-check file exists before upload
+                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64) ?? 0
+                    
+                    if fileSize == 0 {
+                        DispatchQueue.main.async {
+                            self.hideLoadingIndicator()
+                            self.showAlert(title: "File Error", message: "The copied file is empty")
+                        }
+                        return
+                    }
+                    
+                    // Use the copied file for Firebase upload
+                    UnifiedFirebaseStorage.shared.uploadBook(fileURL: destinationURL, title: book.title, author: book.author) { [weak self] result in
+                        DispatchQueue.main.async {
+                            self?.hideLoadingIndicator()
+                            
+                            switch result {
+                            case .success(let uploadedBook):
+                                // Show success animation
+                                self?.showBookAddedAnimation()
+                                
+                                // Refresh the library
+                                self?.loadBooks()
+                                
+                            case .failure(let error):
+                                // Show error alert
+                                self?.showAlert(title: "Upload Failed", message: error.localizedDescription)
+                            }
                         }
                     }
+                } else {
+                    DispatchQueue.main.async {
+                        self.hideLoadingIndicator()
+                        self.showAlert(title: "Not Authenticated", message: "Please sign in to add books")
+                    }
                 }
-            } else {
-                print("❌ User not authenticated! Cannot save to Firebase")
-                let alert = UIAlertController(title: "Not Authenticated", message: "Please sign in to add books", preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "OK", style: .default))
-                present(alert, animated: true)
+                
+            } catch {
+                DispatchQueue.main.async {
+                    self.hideLoadingIndicator()
+                    self.showAlert(title: "File Copy Error", message: "Failed to copy file: \(error.localizedDescription)")
+                }
             }
-            
-        } catch {
-            print("❌ Error copying file: \(error)")
-            url.stopAccessingSecurityScopedResource()
-            let alert = UIAlertController(title: "File Copy Error", message: "Failed to copy file: \(error.localizedDescription)", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
         }
+    }
+    
+    // MARK: - Loading Indicator Methods
+    
+    private func showLoadingIndicator(message: String) {
+        // Remove existing loading indicator if any
+        hideLoadingIndicator()
+        
+        let containerView = UIView()
+        containerView.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        containerView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let contentView = UIView()
+        contentView.backgroundColor = UIColor.systemBackground
+        contentView.layer.cornerRadius = 16
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let activityIndicator = UIActivityIndicatorView(style: .large)
+        activityIndicator.startAnimating()
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+        
+        let label = UILabel()
+        label.text = message
+        label.textAlignment = .center
+        label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+        label.textColor = UIColor.label
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        
+        contentView.addSubview(activityIndicator)
+        contentView.addSubview(label)
+        containerView.addSubview(contentView)
+        view.addSubview(containerView)
+        
+        NSLayoutConstraint.activate([
+            containerView.topAnchor.constraint(equalTo: view.topAnchor),
+            containerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            containerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            
+            contentView.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
+            contentView.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
+            contentView.widthAnchor.constraint(equalToConstant: 200),
+            contentView.heightAnchor.constraint(equalToConstant: 120),
+            
+            activityIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            activityIndicator.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            
+            label.topAnchor.constraint(equalTo: activityIndicator.bottomAnchor, constant: 16),
+            label.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            label.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -16)
+        ])
+        
+        loadingIndicator = containerView
+        loadingLabel = label
+    }
+    
+    private func updateLoadingIndicator(message: String) {
+        loadingLabel?.text = message
+    }
+    
+    private func hideLoadingIndicator() {
+        loadingIndicator?.removeFromSuperview()
+        loadingIndicator = nil
+        loadingLabel = nil
     }
     
     private func showBookAddedAnimation() {
@@ -1037,15 +1400,12 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
     
     private func testFileUpload() {
         guard let userId = FirebaseManager.shared.userId else {
-            print("❌ No user ID for test upload")
             return
         }
         
-        print("🧪 Testing file upload...")
         
         // Create a test file in documents directory
         guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            print("❌ Could not access documents directory")
             showAlert(title: "Error", message: "Could not access documents directory")
             return
         }
@@ -1054,7 +1414,6 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
         
         do {
             try testContent.write(to: testFileURL, atomically: true, encoding: .utf8)
-            print("✅ Test file created at: \(testFileURL)")
             
             // Test Firebase upload with this file
             let storage = Storage.storage()
@@ -1062,15 +1421,11 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
             
             storageRef.putFile(from: testFileURL, metadata: nil) { metadata, error in
                 if let error = error {
-                    print("❌ Test file upload failed: \(error)")
                 } else {
-                    print("✅ Test file upload successful!")
-                    print("📄 Uploaded to: users/\(userId)/test/test.txt")
                 }
             }
             
         } catch {
-            print("❌ Failed to create test file: \(error)")
         }
     }
     
@@ -1098,5 +1453,181 @@ extension ModernLibraryViewController: UIDocumentPickerDelegate {
         })
         
         present(alert, animated: true)
+    }
+}
+
+// MARK: - ModernBookCellDelegate
+extension ModernLibraryViewController: ModernBookCellDelegate {
+    
+    func didTapDeleteButton(for book: Book, in cell: ModernBookCell) {
+        showDeleteConfirmation(for: book)
+    }
+    
+    private func showDeleteConfirmation(for book: Book) {
+        // Get file size directly from the book's file path
+        let fileSize: String
+        if FileManager.default.fileExists(atPath: book.filePath) {
+            do {
+                let attributes = try FileManager.default.attributesOfItem(atPath: book.filePath)
+                let size = attributes[.size] as? Int64 ?? 0
+                fileSize = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            } catch {
+                fileSize = "Unknown size"
+            }
+        } else {
+            fileSize = "File not found"
+        }
+        
+        let alert = UIAlertController(
+            title: "Delete Book",
+            message: "Are you sure you want to delete '\(book.title)' (\(fileSize))?\n\nThis will permanently remove the book from your library and cannot be undone.",
+            preferredStyle: .alert
+        )
+        
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        
+        alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
+            self?.performBookDeletion(book: book)
+        })
+        
+        present(alert, animated: true)
+    }
+    
+    private func performBookDeletion(book: Book) {
+        // Show loading indicator
+        showLoadingIndicator(message: "Deleting book...")
+        
+        // Check if we're using Firebase or local storage
+        if FirebaseManager.shared.isAuthenticated {
+            // Delete from Firebase
+            UnifiedFirebaseStorage.shared.removeBook(bookId: book.id) { [weak self] result in
+                DispatchQueue.main.async {
+                    self?.hideLoadingIndicator()
+                    
+                    switch result {
+                    case .success:
+                        // Also try to delete local file if it exists
+                        self?.deleteLocalFile(at: book.filePath)
+                        
+                        // Show success message with animation
+                        self?.showDeleteSuccessMessage(bookTitle: book.title)
+                        
+                        // Refresh the library
+                        self?.loadBooks()
+                        
+                        // Animate collection view update
+                        self?.animateBookRemoval()
+                        
+                    case .failure(let error):
+                        self?.showAlert(title: "Delete Failed", message: "Could not delete the book: \(error.localizedDescription)")
+                    }
+                }
+            }
+        } else {
+            // Delete from local storage
+            BookStorage.shared.safeDeleteBook(book.id) { [weak self] success in
+                DispatchQueue.main.async {
+                    self?.hideLoadingIndicator()
+                    
+                    if success {
+                        // Show success message with animation
+                        self?.showDeleteSuccessMessage(bookTitle: book.title)
+                        
+                        // Refresh the library
+                        self?.loadBooks()
+                        
+                        // Animate collection view update
+                        self?.animateBookRemoval()
+                        
+                    } else {
+                        self?.showAlert(title: "Delete Failed", message: "Could not delete the book. Please try again.")
+                    }
+                }
+            }
+        }
+    }
+    
+    private func deleteLocalFile(at filePath: String) {
+        // Only delete if file exists and is within our documents directory
+        guard FileManager.default.fileExists(atPath: filePath) else { return }
+        
+        // Get documents directory
+        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        
+        // Ensure file is within our app's directory
+        guard filePath.hasPrefix(documentsPath.path) else { return }
+        
+        do {
+            try FileManager.default.removeItem(atPath: filePath)
+            print("Successfully deleted local file: \(filePath)")
+        } catch {
+            print("Failed to delete local file: \(error.localizedDescription)")
+        }
+    }
+    
+    private func showDeleteSuccessMessage(bookTitle: String) {
+        let successView = UIView()
+        successView.backgroundColor = UIColor.systemRed.withAlphaComponent(0.9)
+        successView.layer.cornerRadius = 25
+        successView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let iconImageView = UIImageView()
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .bold)
+        iconImageView.image = UIImage(systemName: "trash", withConfiguration: config)
+        iconImageView.tintColor = .white
+        iconImageView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let messageLabel = UILabel()
+        messageLabel.text = "Book Deleted"
+        messageLabel.font = UIFont.boldSystemFont(ofSize: 16)
+        messageLabel.textColor = .white
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        
+        let stackView = UIStackView(arrangedSubviews: [iconImageView, messageLabel])
+        stackView.axis = .horizontal
+        stackView.spacing = 12
+        stackView.alignment = .center
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        
+        successView.addSubview(stackView)
+        view.addSubview(successView)
+        
+        NSLayoutConstraint.activate([
+            successView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            successView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -100),
+            successView.heightAnchor.constraint(equalToConstant: 50),
+            successView.widthAnchor.constraint(equalToConstant: 160),
+            
+            stackView.centerXAnchor.constraint(equalTo: successView.centerXAnchor),
+            stackView.centerYAnchor.constraint(equalTo: successView.centerYAnchor)
+        ])
+        
+        // Animate appearance
+        successView.alpha = 0
+        successView.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+        
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0) {
+            successView.alpha = 1
+            successView.transform = .identity
+        }
+        
+        // Auto-hide after 2 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            UIView.animate(withDuration: 0.3) {
+                successView.alpha = 0
+                successView.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+            } completion: { _ in
+                successView.removeFromSuperview()
+            }
+        }
+    }
+    
+    private func animateBookRemoval() {
+        UIView.animate(withDuration: 0.3, delay: 0.1, options: [.curveEaseInOut]) {
+            self.collectionView.performBatchUpdates({
+                // The collection view will automatically animate the changes
+                // when we reload the data after calling loadBooks()
+            })
+        }
     }
 }

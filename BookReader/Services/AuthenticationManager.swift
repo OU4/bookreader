@@ -20,6 +20,7 @@ class AuthenticationManager: NSObject, ObservableObject {
     
     // MARK: - Properties
     private var currentNonce: String?
+    private var appleSignInCompletion: ((Result<User, Error>) -> Void)?
     private var authStateListener: AuthStateDidChangeListenerHandle?
     
     // MARK: - Published Properties
@@ -128,7 +129,14 @@ class AuthenticationManager: NSObject, ObservableObject {
     
     // MARK: - Sign In with Apple
     func startSignInWithAppleFlow(completion: @escaping (Result<User, Error>) -> Void) {
-        let nonce = randomNonceString()
+        appleSignInCompletion = completion
+        guard let nonce = randomNonceString() else {
+            let error = AuthenticationError.nonceGenerationFailed
+            errorMessage = error.localizedDescription
+            completion(.failure(error))
+            appleSignInCompletion = nil
+            return
+        }
         currentNonce = nonce
         
         let appleIDProvider = ASAuthorizationAppleIDProvider()
@@ -194,34 +202,28 @@ class AuthenticationManager: NSObject, ObservableObject {
     }
     
     // MARK: - Apple Sign In Helpers
-    private func randomNonceString(length: Int = 32) -> String {
-        precondition(length > 0)
-        let charset: Array<Character> = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+    private func randomNonceString(length: Int = 32) -> String? {
+        guard length > 0 else { return nil }
+        let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        guard !charset.isEmpty else { return nil }
         var result = ""
         var remainingLength = length
-        
+
         while remainingLength > 0 {
-            let randoms: [UInt8] = (0 ..< 16).map { _ in
-                var random: UInt8 = 0
-                let errorCode = SecRandomCopyBytes(kSecRandomDefault, 1, &random)
-                if errorCode != errSecSuccess {
-                    fatalError("Unable to generate nonce. SecRandomCopyBytes failed with OSStatus \(errorCode)")
-                }
-                return random
+            var random: UInt8 = 0
+            let status = SecRandomCopyBytes(kSecRandomDefault, 1, &random)
+
+            let index: Int
+            if status == errSecSuccess {
+                index = Int(random) % charset.count
+            } else {
+                index = Int.random(in: 0..<charset.count)
             }
-            
-            randoms.forEach { random in
-                if remainingLength == 0 {
-                    return
-                }
-                
-                if random < charset.count {
-                    result.append(charset[Int(random)])
-                    remainingLength -= 1
-                }
-            }
+
+            result.append(charset[index])
+            remainingLength -= 1
         }
-        
+
         return result
     }
     
@@ -239,54 +241,136 @@ class AuthenticationManager: NSObject, ObservableObject {
 // MARK: - ASAuthorizationControllerDelegate
 extension AuthenticationManager: ASAuthorizationControllerDelegate {
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        if let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential {
-            guard let nonce = currentNonce else {
-                fatalError("Invalid state: A login callback was received, but no login request was sent.")
-            }
-            guard let appleIDToken = appleIDCredential.identityToken else {
+        guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            return
+        }
+
+        guard let nonce = currentNonce else {
+            let error = AuthenticationError.invalidNonceState
+            errorMessage = error.localizedDescription
+            appleSignInCompletion?(.failure(error))
+            appleSignInCompletion = nil
+            return
+        }
+
+        guard let appleIDToken = appleIDCredential.identityToken else {
+            let error = AuthenticationError.missingIdentityToken
+            errorMessage = error.localizedDescription
+            appleSignInCompletion?(.failure(error))
+            appleSignInCompletion = nil
+            currentNonce = nil
+            return
+        }
+
+        guard let idTokenString = String(data: appleIDToken, encoding: .utf8) else {
+            let error = AuthenticationError.invalidIdentityTokenEncoding
+            errorMessage = error.localizedDescription
+            appleSignInCompletion?(.failure(error))
+            appleSignInCompletion = nil
+            currentNonce = nil
+            return
+        }
+
+        let credential = OAuthProvider.appleCredential(
+            withIDToken: idTokenString,
+            rawNonce: nonce,
+            fullName: appleIDCredential.fullName
+        )
+
+        Auth.auth().signIn(with: credential) { [weak self] authResult, error in
+            guard let self = self else { return }
+            self.currentNonce = nil
+
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.errorMessage = error.localizedDescription
+                    self.appleSignInCompletion?(.failure(error))
+                    self.appleSignInCompletion = nil
+                }
                 return
             }
-            guard let idTokenString = String(data: appleIDToken, encoding: .utf8) else {
+
+            guard let user = authResult?.user else {
+                let error = AuthenticationError.missingAuthResult
+                DispatchQueue.main.async {
+                    self.errorMessage = error.localizedDescription
+                    self.appleSignInCompletion?(.failure(error))
+                    self.appleSignInCompletion = nil
+                }
                 return
             }
-            
-            // Initialize a Firebase credential
-            let credential = OAuthProvider.appleCredential(withIDToken: idTokenString,
-                                                          rawNonce: nonce,
-                                                          fullName: appleIDCredential.fullName)
-            
-            // Sign in with Firebase
-            Auth.auth().signIn(with: credential) { [weak self] (authResult, error) in
-                if let error = error {
-                    self?.errorMessage = error.localizedDescription
-                    return
+
+            let changeRequest = user.createProfileChangeRequest()
+            changeRequest.displayName = appleIDCredential.fullName?.givenName
+            changeRequest.commitChanges { [weak self] commitError in
+                guard let self = self, let commitError = commitError else { return }
+                DispatchQueue.main.async {
+                    self.errorMessage = commitError.localizedDescription
                 }
-                
-                // Update user profile with Apple ID info
-                if let user = authResult?.user {
-                    let changeRequest = user.createProfileChangeRequest()
-                    changeRequest.displayName = appleIDCredential.fullName?.givenName
-                    changeRequest.commitChanges { error in
-                        if let error = error {
-                        }
-                    }
-                }
+            }
+
+            DispatchQueue.main.async {
+                self.appleSignInCompletion?(.success(user))
+                self.appleSignInCompletion = nil
             }
         }
     }
-    
+
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        errorMessage = error.localizedDescription
+        DispatchQueue.main.async {
+            self.errorMessage = error.localizedDescription
+            self.appleSignInCompletion?(.failure(error))
+            self.appleSignInCompletion = nil
+            self.currentNonce = nil
+        }
     }
 }
 
 // MARK: - ASAuthorizationControllerPresentationContextProviding
 extension AuthenticationManager: ASAuthorizationControllerPresentationContextProviding {
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = windowScene.windows.first else {
-            fatalError("No window found")
+        if let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first(where: { $0.isKeyWindow }) {
+            return window
         }
-        return window
+
+        if let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first {
+            return window
+        }
+
+        if let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) {
+            return window
+        }
+
+        return UIWindow(frame: UIScreen.main.bounds)
+    }
+}
+
+// MARK: - Authentication Errors
+enum AuthenticationError: LocalizedError {
+    case nonceGenerationFailed
+    case invalidNonceState
+    case missingIdentityToken
+    case invalidIdentityTokenEncoding
+    case missingAuthResult
+
+    var errorDescription: String? {
+        switch self {
+        case .nonceGenerationFailed:
+            return "Unable to start Sign in with Apple. Please try again."
+        case .invalidNonceState:
+            return "Authentication flow is no longer valid. Please retry."
+        case .missingIdentityToken:
+            return "Unable to retrieve Apple ID token."
+        case .invalidIdentityTokenEncoding:
+            return "Received an invalid identity token."
+        case .missingAuthResult:
+            return "Failed to complete Sign in with Apple."
+        }
     }
 }

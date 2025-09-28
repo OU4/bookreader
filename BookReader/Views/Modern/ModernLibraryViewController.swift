@@ -541,32 +541,34 @@ class ModernLibraryViewController: UIViewController {
             books = BookStorage.shared.loadBooks()
             filteredBooks = books
             updateEmptyState()
+            updateDynamicContent()
+            refreshStats()
             collectionView.reloadData()
             return
         }
-        
+
         // Use Firebase storage
-        books = UnifiedFirebaseStorage.shared.books
-        for (index, book) in books.enumerated() {
+        let remoteBooks = UnifiedFirebaseStorage.shared.books
+        let localBooks = BookStorage.shared.loadBooks()
+        let localMap = Dictionary(uniqueKeysWithValues: localBooks.map { ($0.id, $0) })
+
+        books = remoteBooks.map { remote in
+            guard let local = localMap[remote.id] else { return remote }
+            var merged = remote
+            if FileManager.default.fileExists(atPath: local.filePath) {
+                merged.filePath = local.filePath
+            }
+            if merged.storageFileName == nil {
+                merged.storageFileName = local.storageFileName
+            }
+            return merged
         }
+
         filteredBooks = books
         updateEmptyState()
+        updateDynamicContent()
+        refreshStats()
         collectionView.reloadData()
-        
-        // Observe changes
-        UnifiedFirebaseStorage.shared.$books
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] updatedBooks in
-                self?.books = updatedBooks
-                self?.filteredBooks = self?.currentSearchText.isEmpty ?? true ? updatedBooks : updatedBooks.filter { book in
-                    book.title.localizedCaseInsensitiveContains(self?.currentSearchText ?? "") ||
-                    book.author.localizedCaseInsensitiveContains(self?.currentSearchText ?? "")
-                }
-                self?.updateEmptyState()
-                self?.collectionView.reloadData()
-                self?.refreshStats()
-            }
-            .store(in: &cancellables)
     }
     
     private func refreshStats() {

@@ -70,19 +70,35 @@ class NetworkMonitor: ObservableObject {
         if isConnected { return true }
         
         return await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var hasResumed = false
             var cancellable: AnyCancellable?
-            let timeoutTask = Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            var timeoutTask: Task<Void, Never>?
+
+            func complete(_ result: Bool) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !hasResumed else { return }
+                hasResumed = true
+
                 cancellable?.cancel()
-                continuation.resume(returning: false)
+                cancellable = nil
+                timeoutTask?.cancel()
+                timeoutTask = nil
+
+                continuation.resume(returning: result)
             }
-            
+
+            timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                complete(false)
+            }
+
             cancellable = $isConnected
                 .filter { $0 }
                 .first()
                 .sink { _ in
-                    timeoutTask.cancel()
-                    continuation.resume(returning: true)
+                    complete(true)
                 }
         }
     }

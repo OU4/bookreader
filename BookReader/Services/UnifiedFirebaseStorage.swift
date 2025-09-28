@@ -675,7 +675,8 @@ class UnifiedFirebaseStorage: ObservableObject {
                     title: title,
                     author: author,
                     filePath: uploadResult.url,
-                    type: .pdf
+                    type: .pdf,
+                    storageFileName: uploadResult.fileName
                 )
                 
                 // Save to Firestore with retry
@@ -869,30 +870,49 @@ class UnifiedFirebaseStorage: ObservableObject {
             }
             
             // Delete from Firestore first
-            docRef.delete { error in
+            docRef.delete { [weak self] error in
                 if let error = error {
                     completion(.failure(error))
                     return
                 }
                 
+                DispatchQueue.main.async {
+                    self?.books.removeAll { $0.id == bookId }
+                }
+
                 // If Firestore deletion succeeded, try to delete from Storage
                 if let document = document, document.exists,
-                   let data = document.data(),
-                   let fileName = data["fileName"] as? String {
-                    
-                    let storageRef = Storage.storage().reference()
-                    let fileRef = storageRef.child("users/\(userId)/books/\(fileName)")
-                    
-                    fileRef.delete { storageError in
-                        if let storageError = storageError {
-                            // Log storage deletion error but don't fail the operation
-                            // since Firestore deletion already succeeded
-                            print("Failed to delete file from Storage: \(storageError.localizedDescription)")
+                   let data = document.data() {
+                    var storageReference: StorageReference?
+
+                    if let explicitName = data["storageFileName"] as? String {
+                        if explicitName.contains("/") {
+                            storageReference = Storage.storage().reference(withPath: explicitName)
                         } else {
-                            print("Successfully deleted file from Storage: \(fileName)")
+                            storageReference = Storage.storage().reference().child("books/\(userId)/\(explicitName)")
                         }
-                        
-                        // Complete successfully regardless of storage deletion result
+                    } else if let storedName = data["fileName"] as? String {
+                        if storedName.contains("/") {
+                            storageReference = Storage.storage().reference(withPath: storedName)
+                        } else {
+                            storageReference = Storage.storage().reference().child("books/\(userId)/\(storedName)")
+                        }
+                    } else if let filePath = data["filePath"] as? String,
+                              let reference = FirebaseDownloadHelper.shared.firebaseReference(from: filePath) {
+                        storageReference = reference
+                    }
+
+                    if let storageReference = storageReference {
+                        storageReference.delete { storageError in
+                            if let storageError = storageError {
+                                print("Failed to delete file from Storage: \(storageError.localizedDescription)")
+                            } else {
+                                print("Successfully deleted file from Storage: \(storageReference.fullPath)")
+                            }
+
+                            completion(.success(()))
+                        }
+                    } else {
                         completion(.success(()))
                     }
                 } else {

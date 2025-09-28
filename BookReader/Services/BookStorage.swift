@@ -369,7 +369,8 @@ class BookStorage {
                     keyTakeaways: data.keyTakeaways ?? "",
                     actionItems: data.actionItems ?? "",
                     sessionNotes: data.sessionNotes ?? [],
-                    notesUpdatedAt: data.notesUpdatedAt
+                    notesUpdatedAt: data.notesUpdatedAt,
+                    storageFileName: data.storageFileName
                 )
             }
         } catch {
@@ -410,6 +411,7 @@ class BookStorage {
                     author: book.author,
                     filePath: fileName, // Store relative path (just filename)
                     type: book.type.rawValue,
+                    storageFileName: book.storageFileName,
                     lastReadPosition: book.lastReadPosition,
                     highlights: book.highlights,
                     notes: book.notes,
@@ -1042,6 +1044,7 @@ struct BookData: Codable {
     let author: String
     let filePath: String
     let type: String
+    let storageFileName: String?
     let lastReadPosition: Float
     let highlights: [Highlight]?
     let notes: [Note]?
@@ -1053,12 +1056,13 @@ struct BookData: Codable {
     let notesUpdatedAt: Date?
     
     // Legacy initializer for backward compatibility
-    init(id: String, title: String, author: String, filePath: String, type: String, lastReadPosition: Float, highlights: [Highlight]? = nil, notes: [Note]? = nil, readingStats: ReadingStats? = nil, personalSummary: String? = nil, keyTakeaways: String? = nil, actionItems: String? = nil, sessionNotes: [BookSessionNote]? = nil, notesUpdatedAt: Date? = nil) {
+    init(id: String, title: String, author: String, filePath: String, type: String, storageFileName: String? = nil, lastReadPosition: Float, highlights: [Highlight]? = nil, notes: [Note]? = nil, readingStats: ReadingStats? = nil, personalSummary: String? = nil, keyTakeaways: String? = nil, actionItems: String? = nil, sessionNotes: [BookSessionNote]? = nil, notesUpdatedAt: Date? = nil) {
         self.id = id
         self.title = title
         self.author = author
         self.filePath = filePath
         self.type = type
+        self.storageFileName = storageFileName
         self.lastReadPosition = lastReadPosition
         self.highlights = highlights
         self.notes = notes

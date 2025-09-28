@@ -23,6 +23,8 @@ class ModernBookCell: UICollectionViewCell {
     private var book: Book?
     private var style: BookCellStyle = .detailed
     private var currentLoadingTask: DispatchWorkItem?
+    private var backgroundGradientLayer: CAGradientLayer?
+    private var progressValue: CGFloat = 0
     
     // Static cache for PDF previews
     private static let previewCache: NSCache<NSString, UIImage> = {
@@ -293,6 +295,10 @@ class ModernBookCell: UICollectionViewCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         gradientOverlay.frame = coverImageView.bounds
+        backgroundGradientLayer?.frame = coverImageView.bounds
+        if progressContainer.bounds.width > 0 {
+            applyProgress(animated: false)
+        }
     }
     
     // MARK: - Configuration
@@ -315,10 +321,12 @@ class ModernBookCell: UICollectionViewCell {
         
         // Load cover image
         if let coverImage = book.coverImage {
+            backgroundGradientLayer?.removeFromSuperlayer()
+            backgroundGradientLayer = nil
             coverImageView.image = coverImage
             placeholderBookIcon.isHidden = true
         } else {
-            loadCoverImage(from: nil)
+            loadCoverImage(for: book)
         }
         
         // Update progress
@@ -334,50 +342,65 @@ class ModernBookCell: UICollectionViewCell {
         addEntranceAnimation()
     }
     
-    private func loadCoverImage(from path: String?) {
-        // Try to generate preview for PDF
-        if let book = book, book.type == .pdf {
-            generatePDFPreview(from: book.filePath)
-        } else {
-            coverImageView.image = nil
-            placeholderBookIcon.isHidden = false
-            
-            // Generate gradient background
-            let colors = generateBookColors()
-            let gradient = CAGradientLayer()
-            gradient.colors = colors.map { $0.cgColor }
-            gradient.startPoint = CGPoint(x: 0, y: 0)
-            gradient.endPoint = CGPoint(x: 1, y: 1)
-            gradient.frame = coverImageView.bounds
-            gradient.cornerRadius = 16
-            
-            coverImageView.layer.sublayers?.removeAll { $0 is CAGradientLayer }
-            coverImageView.layer.insertSublayer(gradient, at: 0)
+    private func loadCoverImage(for book: Book) {
+        currentLoadingTask?.cancel()
+        currentLoadingTask = nil
+
+        coverImageView.image = nil
+        placeholderBookIcon.isHidden = false
+        backgroundGradientLayer?.removeFromSuperlayer()
+        backgroundGradientLayer = nil
+        if gradientOverlay.superlayer == nil {
+            coverImageView.layer.addSublayer(gradientOverlay)
+        }
+
+        guard book.type == .pdf else {
+            applyGradientBackground()
+            return
+        }
+
+        let cacheKey = NSString(string: book.id)
+
+        if let cachedImage = ModernBookCell.previewCache.object(forKey: cacheKey) {
+            backgroundGradientLayer?.removeFromSuperlayer()
+            backgroundGradientLayer = nil
+            coverImageView.image = cachedImage
+            placeholderBookIcon.isHidden = true
+            return
+        }
+
+        if let localURL = resolveLocalURL(for: book) {
+            generatePDFPreview(from: localURL.path, cacheKey: cacheKey)
+            return
+        }
+
+        applyGradientBackground()
+
+        UnifiedFirebaseStorage.shared.downloadBook(book) { [weak self] result in
+            guard let self = self, self.book?.id == book.id else { return }
+            switch result {
+            case .success(let localURL):
+                self.generatePDFPreview(from: localURL.path, cacheKey: cacheKey)
+            case .failure:
+                self.applyGradientBackground()
+            }
         }
     }
     
-    private func generatePDFPreview(from filePath: String) {
+    private func generatePDFPreview(from filePath: String, cacheKey: NSString) {
         // Cancel any existing loading task
         currentLoadingTask?.cancel()
         
         // Store the current book ID to check later
         let currentBookId = book?.id
-        
-        // Check cache first
-        let cacheKey = filePath as NSString
-        if let cachedImage = ModernBookCell.previewCache.object(forKey: cacheKey) {
-            self.coverImageView.image = cachedImage
-            self.placeholderBookIcon.isHidden = true
-            return
-        }
-        
+
         let loadingTask = DispatchWorkItem { [weak self] in
             guard let pdfDocument = PDFDocument(url: URL(fileURLWithPath: filePath)),
                   let firstPage = pdfDocument.page(at: 0) else {
                 DispatchQueue.main.async {
                     // Check if this cell is still showing the same book
                     if self?.book?.id == currentBookId {
-                        self?.loadCoverImage(from: nil)
+                        self?.applyGradientBackground()
                     }
                 }
                 return
@@ -401,6 +424,8 @@ class ModernBookCell: UICollectionViewCell {
             DispatchQueue.main.async {
                 // Only set the image if this cell is still showing the same book
                 if self?.book?.id == currentBookId {
+                    self?.backgroundGradientLayer?.removeFromSuperlayer()
+                    self?.backgroundGradientLayer = nil
                     self?.coverImageView.image = image
                     self?.placeholderBookIcon.isHidden = true
                     
@@ -431,14 +456,73 @@ class ModernBookCell: UICollectionViewCell {
         
         return colors[abs(hash) % colors.count]
     }
+
+    private func resolveLocalURL(for book: Book) -> URL? {
+        let fileManager = FileManager.default
+
+        if fileManager.fileExists(atPath: book.filePath) {
+            return URL(fileURLWithPath: book.filePath)
+        }
+
+        guard let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let cacheDirectory = documentsDirectory.appendingPathComponent("BookCache")
+        var candidateNames: [String] = []
+
+        candidateNames.append("\(book.title.sanitizedFileName())_\(book.id.prefix(8)).pdf")
+
+        if let storageName = book.storageFileName {
+            let lastComponent = (storageName as NSString).lastPathComponent
+            candidateNames.append(lastComponent)
+        }
+
+        for name in candidateNames {
+            let candidateURL = cacheDirectory.appendingPathComponent(name)
+            if fileManager.fileExists(atPath: candidateURL.path) {
+                return candidateURL
+            }
+        }
+
+        return nil
+    }
+
+    private func applyGradientBackground() {
+        let colors = generateBookColors()
+        let gradient = CAGradientLayer()
+        gradient.colors = colors.map { $0.cgColor }
+        gradient.startPoint = CGPoint(x: 0, y: 0)
+        gradient.endPoint = CGPoint(x: 1, y: 1)
+        gradient.frame = coverImageView.bounds
+        gradient.cornerRadius = 16
+
+        backgroundGradientLayer?.removeFromSuperlayer()
+        backgroundGradientLayer = gradient
+        coverImageView.layer.insertSublayer(gradient, at: 0)
+        placeholderBookIcon.isHidden = false
+    }
+
+    private func applyProgress(animated: Bool) {
+        let targetWidth = progressContainer.bounds.width * progressValue
+        progressWidthConstraint.constant = targetWidth
+
+        guard animated else { return }
+
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
+            self.layoutIfNeeded()
+        }
+    }
     
     private func updateProgress(_ progress: Float) {
-        let percentage = Int(progress * 100)
-        progressLabel.text = "\(percentage)%"
-        
-        UIView.animate(withDuration: 0.5, delay: 0.1, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
-            self.progressWidthConstraint.constant = self.progressContainer.frame.width * CGFloat(progress)
-            self.layoutIfNeeded()
+        let clamped = max(0, min(1, progress))
+        progressValue = CGFloat(clamped)
+        progressLabel.text = "\(Int(clamped * 100))%"
+
+        if progressContainer.bounds.width > 0 {
+            applyProgress(animated: window != nil)
+        } else {
+            setNeedsLayout()
         }
     }
     
@@ -574,12 +658,20 @@ class ModernBookCell: UICollectionViewCell {
         
         // Reset image
         coverImageView.image = nil
-        coverImageView.layer.sublayers?.removeAll { $0 is CAGradientLayer }
+        backgroundGradientLayer?.removeFromSuperlayer()
+        backgroundGradientLayer = nil
+        coverImageView.layer.sublayers?.removeAll { layer in
+            layer is CAGradientLayer && layer !== gradientOverlay
+        }
+        if gradientOverlay.superlayer == nil {
+            coverImageView.layer.addSublayer(gradientOverlay)
+        }
         placeholderBookIcon.isHidden = false
-        
+
         // Reset other UI elements
         recentBadge.isHidden = true
         statusBadge.isHidden = true
         progressWidthConstraint.constant = 0
+        progressValue = 0
     }
 }

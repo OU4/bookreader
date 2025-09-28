@@ -16,6 +16,7 @@ struct Book: Codable {
     let title: String
     let author: String
     var filePath: String
+    var storageFileName: String?
     let type: BookType
     let coverImage: UIImage?
     var lastReadPosition: Float = 0
@@ -30,7 +31,7 @@ struct Book: Codable {
     var notesUpdatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, author, filePath, type, lastReadPosition, bookmarks, highlights, notes, readingStats, personalSummary, keyTakeaways, actionItems, sessionNotes, notesUpdatedAt
+        case id, title, author, filePath, storageFileName, type, lastReadPosition, bookmarks, highlights, notes, readingStats, personalSummary, keyTakeaways, actionItems, sessionNotes, notesUpdatedAt
         // Exclude coverImage from Codable
     }
     
@@ -40,6 +41,7 @@ struct Book: Codable {
         title = try container.decode(String.self, forKey: .title)
         author = try container.decode(String.self, forKey: .author)
         filePath = try container.decodeIfPresent(String.self, forKey: .filePath) ?? ""
+        storageFileName = try container.decodeIfPresent(String.self, forKey: .storageFileName)
         type = try container.decode(BookType.self, forKey: .type)
         lastReadPosition = try container.decodeIfPresent(Float.self, forKey: .lastReadPosition) ?? 0.0
         bookmarks = try container.decodeIfPresent([Bookmark].self, forKey: .bookmarks) ?? []
@@ -67,6 +69,7 @@ struct Book: Codable {
         try container.encode(author, forKey: .author)
         try container.encode(filePath, forKey: .filePath)
         try container.encode(type, forKey: .type)
+        try container.encodeIfPresent(storageFileName, forKey: .storageFileName)
         try container.encode(lastReadPosition, forKey: .lastReadPosition)
         try container.encode(bookmarks, forKey: .bookmarks)
         try container.encode(highlights, forKey: .highlights)
@@ -98,7 +101,8 @@ struct Book: Codable {
          keyTakeaways: String = "",
          actionItems: String = "",
          sessionNotes: [BookSessionNote] = [],
-         notesUpdatedAt: Date? = nil) {
+         notesUpdatedAt: Date? = nil,
+         storageFileName: String? = nil) {
         self.id = id
         self.title = title
         self.author = author
@@ -115,6 +119,7 @@ struct Book: Codable {
         self.actionItems = actionItems
         self.sessionNotes = sessionNotes
         self.notesUpdatedAt = notesUpdatedAt
+        self.storageFileName = storageFileName
     }
 }
 
